@@ -1,0 +1,6 @@
+{
+  "compilerOptions": {
+    "nodeResolve": true
+  },
+  "include": ["./vite.config.ts"]
+}

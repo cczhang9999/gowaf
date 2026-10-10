@@ -1,0 +1,23 @@
+[
+  {
+    "_comment": "自定义 WAF 规则示例: ./gowaf -rules rules.example.json 启动; 改完本文件后 kill -HUP <pid> 热加载, 新规则编译失败会保留旧规则。字段说明: id=规则唯一编号, 拦截日志的 rule 字段会显示, 便于排查误报; category=攻击类别, 日志的 category 字段; where=检测的请求位置(path / query / body / header:小写头名, 如 header:user-agent), 留空=检测所有位置; pattern=Go RE2 正则。注意: 进入规则引擎前, 输入已做 normalize(最多 3 层 URL 解码、删 NUL、去 /* */ 注释、空白折叠、统一转小写), 因此 pattern 一律写小写; 而 where 是拿原始字段名做前缀匹配, 保持小写即可。本 _comment 字段加载时被忽略, 不影响解析。本条规则本身: SQL 注入, 匹配 query 里的 union select 联合查询, 如 ?q=1+union+select+password+from+users; normalize 已解码 %27/'、折叠 /* */ 注释, 所以 UNION/**/SELECT 这类变形同样能命中。",
+    "id": "custom-001",
+    "category": "sqli",
+    "where": "query",
+    "pattern": "\\bunion\\b\\s+select\\b"
+  },
+  {
+    "_comment": "后台/敏感路径探测: 拦截对 wp-admin、phpmyadmin、.git、.env 的扫描。^/ 锚定路径开头, 正常业务路径不会误伤。",
+    "id": "custom-002",
+    "category": "admin_probe",
+    "where": "path",
+    "pattern": "^/(wp-admin|phpmyadmin|\\.git|\\.env)"
+  },
+  {
+    "_comment": "扫描器指纹: 按 User-Agent 识别 sqlmap/nikto/masscan 等工具。normalize 已把输入转小写, 所以这里写小写即可匹配 SqlMap/SQLMAP 等大小写变形。",
+    "id": "custom-003",
+    "category": "scanner",
+    "where": "header:user-agent",
+    "pattern": "(sqlmap|nikto|masscan)"
+  }
+]
