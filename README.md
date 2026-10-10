@@ -89,6 +89,53 @@ pnpm dev
 |------|------|------|
 | `/api/metrics` | GET | 获取实时指标 |
 
+### 健康检查接口
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/healthz` | GET | WAF 健康检查 |
+| `/api/bastion/healthz` | GET | 堰垒机健康检查 |
+
+### 堰垒机(SSH)管理接口
+
+> 启动时需加上 `-ssh` 参数。如未启用 SSH 堰垒机,这些接口返回 `503 Service Unavailable`
+> (而非 404),错误信息提示需加 `-ssh` 参数。
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/bastion/users` | GET | 获取所有用户 |
+| `/api/bastion/users` | POST | 创建用户 |
+| `/api/bastion/users/{id}` | GET | 获取指定用户 |
+| `/api/bastion/users/{id}` | PUT | 更新用户 |
+| `/api/bastion/users/{id}` | DELETE | 删除用户 |
+| `/api/bastion/assets` | GET | 获取所有资产 |
+| `/api/bastion/assets` | POST | 创建资产 |
+| `/api/bastion/assets/{id}` | GET | 获取指定资产 |
+| `/api/bastion/assets/{id}` | PUT | 更新资产 |
+| `/api/bastion/assets/{id}` | DELETE | 删除资产 |
+| `/api/bastion/sessions` | GET | 获取所有会话 |
+| `/api/bastion/sessions/{id}/recording` | GET | 下载会话录像 |
+| `/api/bastion/sessions/{id}` | GET | 获取指定会话详情 |
+| `/api/bastion/audit` | GET | 获取审计日志 |
+| `/api/bastion/banned` | GET | 获取禁止命令列表 |
+| `/api/bastion/banned` | POST | 添加禁止命令 |
+| `/api/bastion/config` | GET | 获取堰垒机配置 |
+| `/api/bastion/config` | PUT | 更新堰垒机配置 |
+
+### 启动 SSH 堰垒机
+
+```bash
+# 方式 1: 在 WAF 之外同时启用 SSH 堰垒机
+./gowaf -listen :8080 -upstream http://127.0.0.1:9000 -ssh -ssh-listen :2222 -api-addr :8081
+
+# 方式 2: 仅运行 SSH 堰垒机(不启用 WAF 代理)
+go build -o bastion ./cmd/bastion
+./bastion -api-listen :8081
+```
+
+方式 2 的独立堰垒机二进制也在 `/api/bastion/` 下提供完整的管理接口,
+前端开发控制台代理自动转发 `/api` 到 `http://localhost:8081`。
+
 ## 自定义规则 + 热加载
 
 ```bash
@@ -138,4 +185,4 @@ Aho-Corasick 筛关键字,再跑正则)。
 - 不检查响应内容,没有 TLS 终止(可用 `ListenAndServeTLS` 或放在 Nginx/LB 后面)
 - 没有语义级检测(libinjection 那类 tokenizer),也没有 OWASP CRS 那种异常评分机制
 - 需要真正的生产方案时,可以看 Go 写的 OWASP Coraza(兼容 ModSecurity 规则语法和 CRS),
-  它同样大量用到上面这些 Go 特性
+  它同样大量用到上面这些 Go 特性# gowaf
