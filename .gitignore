@@ -1,0 +1,28 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.log
+gowaf
+
+# Go build cache & module cache
+.gocache/
+.gomodcache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Web
+web/node_modules/
+web/dist/
+
+# Misc
+.DS_Store
+Thumbs.db
