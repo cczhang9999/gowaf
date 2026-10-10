@@ -110,7 +110,7 @@ func (s *AssetStore) Delete(id string) error {
 		updated = append(updated, a)
 	}
 	if !found {
-		return fmt.Errorf("asset %q not found", a.ID)
+		return fmt.Errorf("asset %q not found", id)
 	}
 	s.assets.Store(&updated)
 	return nil
@@ -127,11 +127,11 @@ func (a Asset) MarshalJSON() ([]byte, error) {
 	type Alias Asset
 	return json.Marshal(&struct {
 		Alias
-		Password     string `json:"-"`
-		PrivateKey   string `json:"-"`
+		Password   string `json:"-"`
+		PrivateKey string `json:"-"`
 	}{
-		Alias:      (Alias)(a),
-		Password:   "",
-		PrivateKey: "",
+		Alias:       (Alias)(a),
+		Password:    "",
+		PrivateKey:  "",
 	})
 }

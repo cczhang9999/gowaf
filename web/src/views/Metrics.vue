@@ -1,5 +1,5 @@
 <template>
-  <div class="metrics-page">
+  <div class="page-wrapper">
     <div class="page-header">
       <h2 class="page-title">实时监控</h2>
       <el-button @click="refreshMetrics">刷新</el-button>
@@ -7,7 +7,7 @@
 
     <el-row :gutter="20">
       <el-col :span="8" v-for="item in statItems" :key="item.key">
-        <el-card>
+        <el-card shadow="hover">
           <div class="stat-item">
             <div class="stat-value">{{ item.value }}</div>
             <div class="stat-label">{{ item.label }}</div>
@@ -19,36 +19,59 @@
       </el-col>
     </el-row>
 
-    <el-row :gutter="20" style="margin-top: 20px">
+    <el-row :gutter="20" class="gap-card">
       <el-col :span="12">
-        <el-card>
+        <el-card shadow="hover">
           <template #header>
             <div class="card-title">请求流量趋势</div>
           </template>
-          <div style="height: 300px">
-            <Line :data="{ labels: chartLabels, datasets: [{ label: '请求数', data: requestsData, borderColor: '#409fff', backgroundColor: 'rgba(64, 159, 255, 0.1)', fill: true, tension: 0.4 }, { label: '拦截数', data: blockedData, borderColor: '#ff4d4f', backgroundColor: 'rgba(255, 77, 79, 0.1)', fill: true, tension: 0.4 }] }" :options="chartOptions" />
+          <div class="chart-box">
+            <Line
+              :data="{
+                labels: chartLabels,
+                datasets: [
+                  {
+                    label: '请求数',
+                    data: requestsData,
+                    borderColor: '#409fff',
+                    backgroundColor: 'rgba(64, 159, 255, 0.1)',
+                    fill: true,
+                    tension: 0.4,
+                  },
+                  {
+                    label: '拦截数',
+                    data: blockedData,
+                    borderColor: '#ff4d4f',
+                    backgroundColor: 'rgba(255, 77, 79, 0.1)',
+                    fill: true,
+                    tension: 0.4,
+                  },
+                ],
+              }"
+              :options="chartOptions"
+            />
           </div>
         </el-card>
       </el-col>
       <el-col :span="12">
-        <el-card>
+        <el-card shadow="hover">
           <template #header>
             <div class="card-title">拦截分布</div>
           </template>
-          <div style="height: 300px">
-            <Doughnut :data="{ labels: distLabels, datasets: [{ data: distData, backgroundColor: ['#409fff', '#ffa500', '#67c23a'] }] }" :options="distChartOptions" />
+          <div class="chart-box">
+            <Doughnut :data="distChartData" :options="distChartOptions" />
           </div>
         </el-card>
       </el-col>
     </el-row>
 
-    <el-row :gutter="20" style="margin-top: 20px">
+    <el-row :gutter="20" class="gap-card">
       <el-col :span="24">
-        <el-card>
+        <el-card shadow="hover">
           <template #header>
             <div class="card-title">历史记录</div>
           </template>
-          <el-table :data="historyData" style="width: 100%" height="300">
+          <el-table :data="historyData" class="w-full" height="300">
             <el-table-column prop="timestamp" label="时间" width="180" />
             <el-table-column prop="total" label="总请求" />
             <el-table-column prop="blocked" label="拦截数" />
@@ -80,85 +103,109 @@ const statItems = computed(() => {
   const metrics = wafStore.metrics
   const prev = previousMetrics.value
 
+  const pct = (cur: number, base: number) =>
+    prev && base > 0 ? (((cur - base) * 100) / base).toFixed(1) + '%' : '-'
+  const trend = (cur: number, base: number) =>
+    prev && cur > base ? 'increase' : cur < base ? 'decrease' : ''
+
   return [
     {
       key: 'total',
       label: '总请求数',
       value: metrics.requests_total,
-      change: prev && prev.total > 0 ? ((metrics.requests_total - prev.total) * 100 / prev.total).toFixed(1) + '%' : '-',
-      changeClass: prev && metrics.requests_total > prev.total ? 'increase' : '',
+      change: pct(metrics.requests_total, prev?.total ?? 0),
+      changeClass: trend(metrics.requests_total, prev?.total ?? 0),
     },
     {
       key: 'blocked',
       label: '拦截数',
       value: metrics.blocked,
-      change: prev && prev.blocked > 0 ? ((metrics.blocked - prev.blocked) * 100 / prev.blocked).toFixed(1) + '%' : '-',
-      changeClass: prev && metrics.blocked > prev.blocked ? 'increase' : '',
+      change: pct(metrics.blocked, prev?.blocked ?? 0),
+      changeClass: trend(metrics.blocked, prev?.blocked ?? 0),
     },
     {
       key: 'rules',
       label: '加载规则数',
       value: metrics.rules_loaded,
-      change: prev && prev.rules_loaded > 0 ? ((metrics.rules_loaded - prev.rules_loaded) * 100 / prev.rules_loaded).toFixed(1) + '%' : '-',
-      changeClass: '',
+      change: pct(metrics.rules_loaded, prev?.rules_loaded ?? 0),
+      changeClass: trend(metrics.rules_loaded, prev?.rules_loaded ?? 0),
     },
     {
       key: 'match',
       label: '规则命中',
       value: metrics.rule_matched,
-      change: prev && prev.matched > 0 ? ((metrics.rule_matched - prev.matched) * 100 / prev.matched).toFixed(1) + '%' : '-',
-      changeClass: prev && metrics.rule_matched > prev.matched ? 'increase' : '',
+      change: pct(metrics.rule_matched, prev?.matched ?? 0),
+      changeClass: trend(metrics.rule_matched, prev?.matched ?? 0),
     },
     {
       key: 'limited',
       label: '限流数',
       value: metrics.rate_limited,
-      change: prev && prev.limited > 0 ? ((metrics.rate_limited - prev.limited) * 100 / prev.limited).toFixed(1) + '%' : '-',
-      changeClass: prev && metrics.rate_limited > prev.limited ? 'increase' : '',
+      change: pct(metrics.rate_limited, prev?.limited ?? 0),
+      changeClass: trend(metrics.rate_limited, prev?.limited ?? 0),
     },
   ]
 })
 
-const historyData = ref<Array<{
-  timestamp: string
-  total: number
-  blocked: number
-  matched: number
-  limited: number
-}>>([])
+const historyData = ref<
+  Array<{
+    timestamp: string
+    total: number
+    blocked: number
+    matched: number
+    limited: number
+  }>
+>([])
 
-// 使用 shallowRef 避免图表数据的深度响应式导致的性能问题和潜在的栈溢出
+// shallowRef avoids chart data passing through Vue's deep reactivity.
 const chartLabels = shallowRef<string[]>([])
 const requestsData = shallowRef<number[]>([])
 const blockedData = shallowRef<number[]>([])
 const distLabels = shallowRef<string[]>(['规则命中', '限流', '正常请求'])
-const distData = shallowRef<number[]>([0, 0, 0])
 
 const chartOptions = ref({
   responsive: true,
   maintainAspectRatio: false,
-  scales: {
-    y: {
-      beginAtZero: true,
-    },
-  },
-  animation: false, // 禁用动画提升性能
+  scales: { y: { beginAtZero: true } },
+  animation: false,
 })
 
 const distChartOptions = ref({
   responsive: true,
   maintainAspectRatio: false,
   animation: false,
+  plugins: { legend: { position: 'right' } },
 })
 
-const refreshMetrics = async () => {
-  await wafStore.loadMetrics()
+// Pie distribution: rule match, rate limit, and genuinely normal requests.
+const distChartData = computed(() => {
+  const m = wafStore.metrics
+  const normal = Math.max(0, m.requests_total - m.blocked)
+  return {
+    labels: distLabels.value,
+    datasets: [
+      {
+        data: [m.rule_matched, m.rate_limited, normal],
+        backgroundColor: ['#409ef4', '#e6a23c', '#67c23a'],
+      },
+    ],
+  }
+})
+
+const savePrev = () => {
+  const m = wafStore.metrics
+  previousMetrics.value = {
+    total: m.requests_total,
+    blocked: m.blocked,
+    matched: m.rule_matched,
+    limited: m.rate_limited,
+    rules_loaded: m.rules_loaded,
+  }
 }
 
-const updateCharts = () => {
+const recordHistory = () => {
   const now = new Date()
   const timestamp = now.toLocaleTimeString()
-
   historyData.value.unshift({
     timestamp,
     total: wafStore.metrics.requests_total,
@@ -166,121 +213,72 @@ const updateCharts = () => {
     matched: wafStore.metrics.rule_matched,
     limited: wafStore.metrics.rate_limited,
   })
-
-  // Keep last 20 records
   if (historyData.value.length > 20) {
     historyData.value = historyData.value.slice(0, 20)
   }
 
-  // 更新响应式数据（创建新数组触发浅层响应）
   chartLabels.value = [timestamp, ...chartLabels.value.slice(0, 19)]
   requestsData.value = [wafStore.metrics.requests_total, ...requestsData.value.slice(0, 19)]
   blockedData.value = [wafStore.metrics.blocked, ...blockedData.value.slice(0, 19)]
+}
 
-  // 更新分布图数据
-  const normalRequests = Math.max(0, wafStore.metrics.requests_total - wafStore.metrics.blocked - wafStore.metrics.rule_matched - wafStore.metrics.rate_limited)
-  distData.value = [
-    wafStore.metrics.rule_matched,
-    wafStore.metrics.rate_limited,
-    normalRequests,
-  ]
+const refreshMetrics = async () => {
+  await wafStore.loadMetrics()
+  savePrev()
+  recordHistory()
 }
 
 onMounted(() => {
-  // 初始加载
   const init = async () => {
     await wafStore.loadMetrics()
-
-    // Set initial values
-    previousMetrics.value = {
-      total: wafStore.metrics.requests_total,
-      blocked: wafStore.metrics.blocked,
-      matched: wafStore.metrics.rule_matched,
-      limited: wafStore.metrics.rate_limited,
-      rules_loaded: wafStore.metrics.rules_loaded,
-    }
-
-    updateCharts()
+    savePrev()
+    recordHistory()
   }
   init()
 
-  // Auto refresh every 5 seconds
   const interval = setInterval(async () => {
     try {
       await wafStore.loadMetrics()
-      
-      // 更新 previousMetrics 为加载前的值（用于计算变化率）
-      // 注意：这里应该在 loadMetrics 之前保存，但为了简化逻辑，我们在加载后更新
-      // 实际的变化率计算使用的是上一轮保存的 previousMetrics
-      previousMetrics.value = {
-        total: wafStore.metrics.requests_total,
-        blocked: wafStore.metrics.blocked,
-        matched: wafStore.metrics.rule_matched,
-        limited: wafStore.metrics.rate_limited,
-        rules_loaded: wafStore.metrics.rules_loaded,
-      }
-      
-      updateCharts()
+      savePrev()
+      recordHistory()
     } catch (error) {
       console.error('Failed to refresh metrics:', error)
     }
   }, 5000)
 
-  onUnmounted(() => {
-    clearInterval(interval)
-  })
+  onUnmounted(() => clearInterval(interval))
 })
 </script>
 
 <style scoped>
-.metrics-page {
-  padding: 20px;
-}
-
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
-
-.page-title {
-  margin: 0;
-  color: #303133;
-}
-
 .stat-item {
   text-align: center;
-  padding: 20px;
+  padding: 16px 0;
 }
 
 .stat-value {
   font-size: 28px;
   font-weight: 600;
-  color: #303133;
-  margin-bottom: 10px;
+  color: var(--text-primary);
+  margin-bottom: 8px;
 }
 
 .stat-label {
   font-size: 14px;
-  color: #909399;
-  margin-bottom: 8px;
+  color: var(--text-disabled);
+  margin-bottom: 6px;
 }
 
 .stat-change {
   font-size: 12px;
+  font-weight: 600;
 }
 
 .stat-change.increase {
-  color: #f56c6c;
+  color: #ff6b6b;
 }
 
 .stat-change.decrease {
   color: #67c23a;
-}
-
-.card-title {
-  font-weight: 600;
-  color: #303133;
 }
 </style>

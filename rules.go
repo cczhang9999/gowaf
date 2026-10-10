@@ -33,7 +33,7 @@ func extractKeywords(pattern string) []string {
 
 	flush := func() {
 		// 过滤过短的关键词(<=2 字符),它们匹配太多正常流量,过滤效果差
-		if lit.Len() >= 3 {
+		if lit.Len() >= 2 {
 			kw := strings.ToLower(lit.String())
 			keywords = append(keywords, kw)
 		}

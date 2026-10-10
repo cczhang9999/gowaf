@@ -2,12 +2,15 @@ package bastion
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,7 +18,6 @@ import (
 )
 
 // SessionEvent is emitted for every notable session lifecycle event.
-// Subscribers (audit logger, recording index, etc.) can listen.
 type SessionEvent struct {
 	Type      string // "login", "logout", "command", "blocked", "resize"
 	SessionID string
@@ -29,7 +31,7 @@ type SessionEvent struct {
 // It accepts SSH connections, authenticates users, and proxies them
 // to backend assets with full session recording and command audit.
 //
-// The architecture mirrors gowaf's design principles:
+// Architecture mirrors gowaf's design principles:
 //   - atomic config swaps for hot reload (like gowaf's rules)
 //   - structured JSON logging via slog
 //   - graceful shutdown via context cancellation
@@ -53,7 +55,7 @@ type SSHServer struct {
 	sessionsMu sync.Mutex
 	sessions   map[string]*SessionContext
 
-	// Event channel for subscribers
+	// Event channel for async audit logging
 	events chan SessionEvent
 
 	// Host key signer
@@ -65,28 +67,31 @@ type SessionContext struct {
 	ID        string
 	User      *User
 	Asset     *Asset
-	Conn      *ssh.ServerConn
-	Channel   ssh.Channel
 	StartTime time.Time
 
-	recording *SessionRecord
-	logger    *AuditLogger
-	audit     *AuditStore
+	recording  *SessionRecord
+	logger     *AuditLogger
+	audit      *AuditStore
 
-	// Terminal state
 	termWidth  int
 	termHeight int
-	ptyReq     *ssh.Pty
+	ptyReq     *PtyRequest
+
+	// Channel is the client SSH channel (for writing messages to the user).
+	Channel ssh.Channel
+}
+
+// PtyRequest holds parsed PTY request parameters.
+type PtyRequest struct {
+	Term    string
+	Columns int
+	Rows    int
+	Width   int
+	Height  int
 }
 
 // NewSSHServer creates a new bastion SSH server.
 func NewSSHServer(cfg *BastionConfig, log *slog.Logger) (*SSHServer, error) {
-	signer, err := ssh.ParsePrivateKeyWithPassphrase([]byte{}, nil)
-	_ = signer // placeholder; host key loading handled in Start
-	if err != nil {
-		// We'll load the host key in Start()
-	}
-
 	authStore := NewAuthStore()
 	assetStore := NewAssetStore()
 	recorder := NewSessionRecorder(cfg.RecordingDir)
@@ -98,12 +103,19 @@ func NewSSHServer(cfg *BastionConfig, log *slog.Logger) (*SSHServer, error) {
 		logger:       log,
 		authStore:    authStore,
 		assetStore:   assetStore,
-		auditLogger:  nil, // initialized in Start
 		auditStore:   auditStore,
 		recorder:     recorder,
 		recordingIdx: recordingIdx,
 		sessions:     make(map[string]*SessionContext),
 		events:       make(chan SessionEvent, 1000),
+	}
+
+	// Initialize audit logger
+	auditLogger, err := NewAuditLogger(cfg.AuditLogPath)
+	if err != nil {
+		log.Warn("failed to open audit log, file audit disabled", "err", err)
+	} else {
+		srv.auditLogger = auditLogger
 	}
 
 	return srv, nil
@@ -116,7 +128,7 @@ func (s *SSHServer) SetConfig(cfg *BastionConfig) {
 
 // SetAssets atomically updates the backend asset list.
 func (s *SSHServer) SetAssets(assets []Asset) {
-	s.assetStore.assets.Store(&assets)
+	s.assetStore.Set(assets)
 }
 
 // SetUsers replaces all users (used by API management).
@@ -149,7 +161,7 @@ func (s *SSHServer) Events() <-chan SessionEvent {
 	return s.events
 }
 
-// Sessions returns a list of active session IDs.
+// ActiveSessions returns a list of active session contexts.
 func (s *SSHServer) ActiveSessions() []*SessionContext {
 	s.sessionsMu.Lock()
 	defer s.sessionsMu.Unlock()
@@ -180,12 +192,11 @@ func (s *SSHServer) RecordingIndex() *RecordingIndex {
 	return s.recordingIdx
 }
 
-// Start starts the SSH server and blocks until the listener errors.
+// Start starts the SSH server and blocks until the listener errors or context is cancelled.
 func (s *SSHServer) Start(ctx context.Context) error {
-	// Load host key
+	// Load or generate host key
 	signer, err := loadHostKey(s.config.HostKeyPath)
 	if err != nil {
-		// Generate a new ephemeral key if loading fails
 		s.logger.Warn("failed to load host key, generating ephemeral key", "err", err)
 		signer, err = generateHostKey()
 		if err != nil {
@@ -196,28 +207,16 @@ func (s *SSHServer) Start(ctx context.Context) error {
 	s.signer = signer
 
 	sshConfig := &ssh.ServerConfig{
-		// Support both password and public key auth
 		NoClientAuth: false,
-		// After authentication
+		BannerCallback: func(conn ssh.ConnMetadata) string {
+			return s.config.BannerMsg
+		},
 	}
-
-	// Add host key
 	sshConfig.AddHostKey(signer)
-
-	// Set up authentication callbacks
 	sshConfig.PasswordCallback = s.passwordCallback
 	sshConfig.PublicKeyCallback = s.publicKeyCallback
 
 	s.sshConfig = sshConfig
-
-	// Initialize audit logger
-	auditLogger, err := NewAuditLogger(s.config.AuditLogPath)
-	if err != nil {
-		s.logger.Error("failed to open audit log, audit disabled", "err", err)
-	} else {
-		s.auditLogger = auditLogger
-		defer auditLogger.Close()
-	}
 
 	// Start event processing loop
 	go s.processEvents()
@@ -226,7 +225,7 @@ func (s *SSHServer) Start(ctx context.Context) error {
 	s.logger.Info("bastion SSH server starting", "addr", s.config.SSHListenAddr)
 	listener, err := net.Listen("tcp", s.config.SSHListenAddr)
 	if err != nil {
-		return fmt.Errorf("listen: %w", err)
+		return fmt.Errorf("listen %s: %w", s.config.SSHListenAddr, err)
 	}
 	s.listener = listener
 
@@ -237,7 +236,43 @@ func (s *SSHServer) Start(ctx context.Context) error {
 	<-ctx.Done()
 	s.logger.Info("bastion SSH server shutting down")
 	listener.Close()
+
+	if s.auditLogger != nil {
+		s.auditLogger.Close()
+	}
 	return nil
+}
+
+// passwordCallback authenticates users via SSH password auth.
+func (s *SSHServer) passwordCallback(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+	username := conn.User()
+	user, err := s.authStore.Authenticate(username, string(password))
+	if err != nil {
+		s.logger.Warn("password auth failed", "user", username, "client", conn.RemoteAddr().String())
+		return nil, fmt.Errorf("access denied")
+	}
+	return &ssh.Permissions{
+		Extensions: map[string]string{
+			"username": user.Username,
+			"role":     string(user.Role),
+		},
+	}, nil
+}
+
+// publicKeyCallback authenticates users via SSH public key auth.
+func (s *SSHServer) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+	username := conn.User()
+	user, err := s.authStore.AuthenticatePublicKey(username, key)
+	if err != nil {
+		s.logger.Warn("public key auth failed", "user", username, "client", conn.RemoteAddr().String())
+		return nil, fmt.Errorf("access denied")
+	}
+	return &ssh.Permissions{
+		Extensions: map[string]string{
+			"username": user.Username,
+			"role":     string(user.Role),
+		},
+	}, nil
 }
 
 // acceptLoop accepts incoming SSH connections.
@@ -260,26 +295,25 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	clientAddr := conn.RemoteAddr().String()
 
-	// SSH handshake
+	// SSH handshake (auth happens inside)
 	newConn, chans, reqs, err := ssh.NewServerConn(conn, s.sshConfig)
 	if err != nil {
 		s.logger.Warn("ssh handshake failed", "client", clientAddr, "err", err)
 		return
 	}
 
-	// At this point, the user is authenticated via the callbacks.
-	// The username is available in newConn.User()
 	username := newConn.User()
 	user, ok := s.authStore.GetUser(username)
 	if !ok {
-		s.logger.Warn("authenticated user not found in store", "username", username)
+		s.logger.Warn("authenticated user not in store", "username", username)
 		return
 	}
 
 	s.logger.Info("ssh connection accepted", "user", username, "client", clientAddr)
 
+	sessionID := generateSessionID()
+
 	// Emit login event
-	sessionID := sessionID()
 	s.emitEvent(SessionEvent{
 		Type:      "login",
 		SessionID: sessionID,
@@ -288,24 +322,16 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn) {
 		Time:      time.Now(),
 	})
 
-	// Track this session
+	// Register session
 	sc := &SessionContext{
 		ID:        sessionID,
 		User:      user,
 		StartTime: time.Now(),
 		logger:    s.auditLogger,
 		audit:     s.auditStore,
-		recorder:  s.recorder,
 	}
-
-	s.sessionsMu.Lock()
-	s.sessions[sessionID] = sc
-	s.sessionsMu.Unlock()
-	defer func() {
-		s.sessionsMu.Lock()
-		delete(s.sessions, sessionID)
-		s.sessionsMu.Unlock()
-	}()
+	s.registerSession(sc)
+	defer s.unregisterSession(sessionID)
 
 	// Close the connection when context is done
 	go func() {
@@ -316,91 +342,62 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn) {
 	// Handle global requests (keepalive, etc.)
 	go ssh.DiscardRequests(reqs)
 
-	// Determine the target asset.
-	// If the user connected with a specific target (e.g., via env or direct-tcp request),
-	// use that; otherwise present an asset selection menu.
-	ch := chans[0] // first channel (session)
-	if len(chans) > 0 {
-		go s.handleChannel(ctx, ch, sc, newConn, false, clientAddr)
-	}
-
-	// Also handle additional channels (for port forwarding / direct-tcp)
-	for ch := range chans {
-		go s.handleChannel(ctx, ch, sc, newConn, true, clientAddr)
+	// Handle the first channel (typically a session channel)
+	select {
+	case ch := <-chans:
+		s.handleSessionChannel(ctx, ch, sc, newConn, clientAddr)
+	default:
+		// No channels in the first few ms; wait briefly
+		select {
+		case ch := <-chans:
+			s.handleSessionChannel(ctx, ch, sc, newConn, clientAddr)
+		case <-time.After(5 * time.Second):
+			s.logger.Warn("no session channel received, closing connection", "user", username)
+		}
 	}
 }
 
-// handleChannel processes an SSH channel from the authenticated connection.
-func (s *SSHServer) handleChannel(ctx context.Context, ch ssh.NewChannel, sc *SessionContext, conn *ssh.ServerConn, auto bool, clientAddr string) {
+// registerSession adds a session to the active set.
+func (s *SSHServer) registerSession(sc *SessionContext) {
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	s.sessions[sc.ID] = sc
+}
+
+// unregisterSession removes a session from the active set and emits a logout event.
+func (s *SSHServer) unregisterSession(id string) {
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	delete(s.sessions, id)
+
+	s.emitEvent(SessionEvent{
+		Type:      "logout",
+		SessionID: id,
+		Time:      time.Now(),
+	})
+}
+
+// handleSessionChannel processes a session channel from the authenticated connection.
+func (s *SSHServer) handleSessionChannel(ctx context.Context, ch ssh.NewChannel, sc *SessionContext, conn *ssh.ServerConn, clientAddr string) {
 	if ch.ChannelType() != "session" {
 		ch.Reject(ssh.UnknownChannelType, "unknown channel type")
 		return
 	}
 
-	// Check if this is a direct-tcp forward (proxy mode: ssh -J user@asset)
-	// or a session request (menu mode)
-	if auto {
-		ch.Reject(ssh.UnknownChannelType, "session channel already handled")
-		return
-	}
-
 	channel, requests, err := ch.Accept()
 	if err != nil {
-		s.logger.Error("failed to accept channel", "err", err)
+		s.logger.Error("failed to accept session channel", "err", err)
 		return
 	}
 	defer channel.Close()
 	sc.Channel = channel
 
-	// Check for "direct" requests that specify the target asset
-	if target := checkDirectRequest(requests); target != "" {
-		// Proxy mode: user specified target in connection request
-		asset, ok := s.resolveAsset(target)
-		if !ok {
-			fmt.Fprintf(channel, "Asset not found: %s\n", target)
-			return
-		}
-		if !s.authStore.CanAccessAsset(sc.User, asset.ID) {
-			fmt.Fprintln(channel, "Access denied to this asset")
-			return
-		}
-		sc.Asset = asset
-		s.handleProxySession(ctx, sc, channel, requests, clientAddr)
-		return
-	}
-
-	// Menu mode: present asset selection menu
-	s.handleMenuMode(ctx, sc, channel, requests, clientAddr)
-}
-
-// checkDirectRequest checks incoming requests for a "direct" target specification.
-// This supports proxy mode: ssh user@asset-host@bastion-host
-func checkDirectRequest(reqs <-chan *ssh.Request) string {
-	// In SSH, direct-tcp-ip requests are used for proxying.
-	// For session channels, we check for env requests with a custom target.
-	return ""
-}
-
-// resolveAsset resolves an asset by name, hostname, or "user@hostname" pattern.
-func (s *SSHServer) resolveAsset(target string) (*Asset, bool) {
+	// Determine the target asset
 	assets := s.assetStore.All()
-	for i := range assets {
-		if assets[i].Hostname == target || assets[i].Name == target || assets[i].ID == target {
-			return &assets[i], true
-		}
-	}
-	return nil, false
-}
-
-// handleMenuMode presents an interactive asset selection menu to the user.
-func (s *SSHServer) handleMenuMode(ctx context.Context, sc *SessionContext, channel ssh.Channel, requests <-chan *ssh.Request, clientAddr string) {
-	assets := s.assetStore.All()
-
-	// Filter assets by user permissions
 	var accessible []Asset
-	for range assets {
-		if s.authStore.CanAccessAsset(sc.User, assets[0].ID) {
-			accessible = append(accessible, assets[0])
+	for i := range assets {
+		if s.authStore.CanAccessAsset(sc.User, assets[i].ID) {
+			accessible = append(accessible, assets[i])
 		}
 	}
 
@@ -409,44 +406,29 @@ func (s *SSHServer) handleMenuMode(ctx context.Context, sc *SessionContext, chan
 		return
 	}
 
-	fmt.Fprintln(channel, "=== Bastion Host - Asset Menu ===")
-	fmt.Fprintln(channel, fmt.Sprintf("Welcome, %s (role: %s)", sc.User.Username, sc.User.Role))
-	fmt.Fprintln(channel, "")
-	fmt.Fprintln(channel, "Available assets:")
-	for i, a := range accessible {
-		fmt.Fprintf(channel, "  [%d] %s (%s:%d)\n", i+1, a.Name, a.Hostname, assetPort(a))
+	// If exactly one asset, connect directly; otherwise present menu.
+	if len(accessible) == 1 {
+		sc.Asset = &accessible[0]
+	} else {
+		selected, cancelled := s.presentAssetMenu(channel, accessible, sc.User.Username, string(sc.User.Role))
+		if cancelled {
+			fmt.Fprintln(channel, "Session cancelled.")
+			return
+		}
+		sc.Asset = selected
 	}
-	fmt.Fprintln(channel, "")
-	fmt.Fprintln(channel, "Enter selection number or 'q' to quit:")
 
-	// Read user input
-	buf := make([]byte, 256)
-	n, err := channel.Read(buf)
-	if err != nil {
-		return
-	}
-	input := strings.TrimSpace(string(buf[:n]))
-	if input == "q" || input == "quit" {
-		fmt.Fprintln(channel, "Goodbye.")
+	if sc.Asset == nil {
 		return
 	}
 
-	idx, err := strconv.Atoi(input)
-	if err != nil || idx < 1 || idx > len(accessible) {
-		fmt.Fprintln(channel, "Invalid selection.")
-		return
-	}
-
-	selected := accessible[idx-1]
-	sc.Asset = &selected
-
-	// Log the login
+	// Log the connection
 	if s.auditLogger != nil {
 		s.auditLogger.Log(&AuditEvent{
 			Username:  sc.User.Username,
 			SessionID: sc.ID,
-			AssetID:   selected.ID,
-			AssetName: selected.Name,
+			AssetID:   sc.Asset.ID,
+			AssetName: sc.Asset.Name,
 			Action:    ActionLogin,
 			ClientIP:  clientAddr,
 		})
@@ -454,52 +436,107 @@ func (s *SSHServer) handleMenuMode(ctx context.Context, sc *SessionContext, chan
 	s.auditStore.Append(AuditEvent{
 		Username:  sc.User.Username,
 		SessionID: sc.ID,
-		AssetID:   selected.ID,
+		AssetID:   sc.Asset.ID,
+		AssetName: sc.Asset.Name,
 		Action:    ActionLogin,
 		ClientIP:  clientAddr,
 	})
 
-	// Start the proxy session
-	s.handleProxySession(ctx, sc, channel, requests, clientAddr)
-}
-
-// handleProxySession establishes a PTY session on the target asset
-// and proxies all I/O between the user and the target.
-func (s *SSHServer) handleProxySession(ctx context.Context, sc *SessionContext, channel ssh.Channel, requests <-chan *ssh.Request, clientAddr string) {
-	asset := sc.Asset
-	if asset == nil {
-		return
-	}
-
 	// Start session recording
-	rec, err := s.recorder.StartSession(sc.ID, sc.User.Username, asset.ID, asset.Name)
-	if err != nil {
-		s.logger.Error("failed to start recording", "err", err, "session", sc.ID)
+	rec, recErr := s.recorder.StartSession(sc.ID, sc.User.Username, sc.Asset.ID, sc.Asset.Name)
+	if recErr != nil {
+		s.logger.Error("failed to start recording", "err", recErr, "session", sc.ID)
 	}
 	sc.recording = rec
 	if rec != nil {
 		s.recordingIdx.Register(rec)
 	}
 
-	// Connect to the target asset
-	targetAddr := fmt.Sprintf("%s:%d", asset.Hostname, assetPort(asset))
-	s.logger.Info("proxying to asset", "user", sc.User.Username, "asset", asset.Name, "target", targetAddr)
+	// Start the SSH proxy session (handles PTY, resize, and I/O proxying)
+	s.handleProxySession(ctx, sc, channel, requests, clientAddr)
 
-	// Set up the proxy connection
-	proxy := NewSSHProxy(targetAddr, assetUsername(asset, sc, s), s.config.DefaultUser, s.signer, s.logger)
-	sshConn, chans, reqs, err := proxy.Connect(ctx)
+	// Clean up recording
+	if rec != nil {
+		rec.Stop()
+	}
+}
+
+// presentAssetMenu shows an interactive menu and returns the selected asset.
+func (s *SSHServer) presentAssetMenu(channel ssh.Channel, assets []Asset, username string, role string) (*Asset, bool) {
+	fmt.Fprintln(channel, "=== Bastion Host - Asset Menu ===")
+	fmt.Fprintf(channel, "Welcome, %s (role: %s)\n", username, role)
+	fmt.Fprintln(channel)
+	fmt.Fprintln(channel, "Available assets:")
+	for i, a := range assets {
+		port := a.Port
+		if port == 0 {
+			port = s.config.DefaultPort
+		}
+		fmt.Fprintf(channel, "  [%d] %s (%s:%d)\n", i+1, a.Name, a.Hostname, port)
+	}
+	fmt.Fprintln(channel)
+	fmt.Fprintln(channel, "Enter selection number (or 'q' to quit): ")
+
+	// Read user input
+	buf := make([]byte, 256)
+	n, err := channel.Read(buf)
+	if err != nil {
+		return nil, false
+	}
+	input := strings.TrimSpace(string(buf[:n]))
+	if input == "q" || input == "quit" {
+		return nil, true
+	}
+
+	idx, err := strconv.Atoi(input)
+	if err != nil || idx < 1 || idx > len(assets) {
+		fmt.Fprintln(channel, "Invalid selection.")
+		return nil, true
+	}
+
+	return &assets[idx-1], false
+}
+
+// handleProxySession establishes a connection to the target asset and
+// proxies all I/O between the user and the target, with session recording
+// and command audit.
+func (s *SSHServer) handleProxySession(ctx context.Context, sc *SessionContext, channel ssh.Channel, requests <-chan *ssh.Request, clientAddr string) {
+	asset := sc.Asset
+	if asset == nil {
+		return
+	}
+
+	// Prepare proxy config
+	signer, signerErr := s.assetSigner(asset)
+	proxyCfg := &ProxyConfig{
+		TargetAddr: fmt.Sprintf("%s:%d", asset.Hostname, assetPort(*asset)),
+		Username:   assetUsername(*asset, sc, s),
+		Password:   asset.Password,
+		PrivateKey: signer,
+		Logger:     s.logger,
+	}
+	if signerErr != nil {
+		s.logger.Warn("failed to load asset private key", "asset", asset.ID, "err", signerErr)
+	}
+
+	proxy := NewSSHProxy(proxyCfg)
+
+	// Connect to backend
+	sshConn, err := proxy.Connect(ctx)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to connect to %s: %v\n", asset.Name, err)
 		channel.Write([]byte(msg))
-		if rec != nil {
-			rec.RecordOutput([]byte(msg), time.Since(sc.StartTime))
+		if sc.recording != nil {
+			sc.recording.RecordOutput([]byte(msg), time.Since(sc.StartTime))
 		}
 		return
 	}
 	defer sshConn.Close()
 
-	// Create a session on the target
-	session, err := proxy.CreateSession(ctx)
+	s.logger.Info("proxy connected", "user", sc.User.Username, "asset", asset.Name, "target", proxyCfg.TargetAddr)
+
+	// Create session on target
+	session, err := proxy.CreateSession(ctx, sshConn)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to create session: %v\n", err)
 		channel.Write([]byte(msg))
@@ -507,104 +544,127 @@ func (s *SSHServer) handleProxySession(ctx context.Context, sc *SessionContext, 
 	}
 	defer session.Close()
 
-	// Request a PTY on the target
+	// PTY setup
 	termWidth, termHeight := 80, 24
+	termType := "xterm-256color"
+	modes := ssh.TerminalModes{}
 	if sc.ptyReq != nil {
+		termType = sc.ptyReq.Term
 		termWidth = sc.ptyReq.Columns
 		termHeight = sc.ptyReq.Rows
+		if termWidth == 0 {
+			termWidth = 80
+		}
+		if termHeight == 0 {
+			termHeight = 24
+		}
 	}
 
-	err = session.RequestPty("xterm-256color", termHeight, termWidth, ssh.TerminalModes{})
+	err = session.RequestPty(termType, termHeight, termWidth, modes)
 	if err != nil {
-		s.logger.Warn("failed to request PTY", "err", err)
+		s.logger.Warn("failed to request PTY on target", "err", err)
 	}
 
-	// Set up stdin/stdout/stderr piping with recording
+	// Set up pipes
 	stdin, _ := session.StdinPipe()
 	stdout, _ := session.StdoutPipe()
 	stderr, _ := session.StderrPipe()
 
-	// Start the session
-	err = session.Start("bash")
+	// Start shell on target
+	err = session.Start("/bin/bash")
 	if err != nil {
-		channel.Write([]byte(fmt.Sprintf("Failed to start shell: %v\n", err)))
-		return
+		err = session.Start("/bin/sh")
+		if err != nil {
+			msg := fmt.Sprintf("Failed to start shell: %v\n", err)
+			channel.Write([]byte(msg))
+			return
+		}
 	}
 
-	// Proxy I/O with recording and command audit
+	// Start I/O proxying with recording and audit
+	cmdScanner := newCommandScanner()
 	done := make(chan struct{})
+
+	// User -> Target (stdin)
 	go func() {
-		// Copy stdin (user -> target)
-		go func() {
-			scanner := newCommandScanner()
-			for {
-				buf := make([]byte, 4096)
-				n, err := channel.Read(buf)
-				if n > 0 {
-					data := buf[:n]
-					// Record input
-					if rec != nil {
-						rec.RecordInput(data, time.Since(sc.StartTime))
-					}
-					// Audit commands
-					scanner.Feed(data, sc, s)
-					// Forward to target
-					stdin.Write(data)
-				}
-				if err != nil {
-					break
-				}
-			}
+		defer func() {
 			stdin.Close()
 		}()
-
-		// Copy stdout (target -> user)
-		go func() {
-			for {
-				buf := make([]byte, 4096)
-				n, err := stdout.Read(buf)
-				if n > 0 {
-					data := buf[:n]
-					if rec != nil {
-						rec.RecordOutput(data, time.Since(sc.StartTime))
-					}
-					channel.Write(data)
+		for {
+			buf := make([]byte, 4096)
+			n, err := channel.Read(buf)
+			if n > 0 {
+				data := buf[:n]
+				if sc.recording != nil {
+					sc.recording.RecordInput(data, time.Since(sc.StartTime))
 				}
-				if err != nil {
-					break
-				}
+				cmdScanner.Feed(data, sc, s)
+				stdin.Write(data)
 			}
-		}()
-
-		// Copy stderr
-		go func() {
-			for {
-				buf := make([]byte, 4096)
-				n, err := stderr.Read(buf)
-				if n > 0 {
-					channel.Write(buf[:n])
-				}
-				if err != nil {
-					break
-				}
+			if err != nil {
+				break
 			}
-		}()
+		}
+	}()
 
-		// Wait for session to complete
+	// Target -> User (stdout)
+	go func() {
+		for {
+			buf := make([]byte, 4096)
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				data := buf[:n]
+				if sc.recording != nil {
+					sc.recording.RecordOutput(data, time.Since(sc.StartTime))
+				}
+				channel.Write(data)
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
+	// Target -> User (stderr)
+	go func() {
+		for {
+			buf := make([]byte, 4096)
+			n, err := stderr.Read(buf)
+			if n > 0 {
+				channel.Write(buf[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
+	// Wait for session to complete
+	go func() {
 		session.Wait()
 		close(done)
 	}()
 
-	// Handle terminal resize requests
+	// Handle PTY and resize requests from the client
 	go func() {
 		for req := range requests {
-			if req.Type == "window-change" {
+			switch req.Type {
+			case "pty-req":
+				ptyReq := parsePtyRequest(req.Payload)
+				if ptyReq != nil {
+					sc.ptyReq = ptyReq
+					if ptyReq.Columns > 0 && ptyReq.Rows > 0 {
+						session.WindowChange(ptyReq.Rows, ptyReq.Columns)
+					}
+				}
+				req.Reply(true, nil)
+			case "window-change":
 				w, h := decodeTerminalSize(req.Payload)
 				sc.termWidth = w
 				sc.termHeight = h
 				session.WindowChange(h, w)
 				req.Reply(true, nil)
-			} else {
+			default:
 				req.Reply(false, nil)
 			}
 		}
@@ -616,23 +676,21 @@ func (s *SSHServer) handleProxySession(ctx context.Context, sc *SessionContext, 
 	case <-ctx.Done():
 		session.Signal(ssh.SIGKILL)
 	}
-
-	// Clean up recording
-	if rec != nil {
-		rec.Stop()
-	}
-
-	// Log logout
-	s.emitEvent(SessionEvent{
-		Type:      "logout",
-		SessionID: sc.ID,
-		Username:  sc.User.Username,
-		AssetID:   asset.ID,
-		Time:      time.Now(),
-	})
 }
 
-// emitEvent sends a session event to the event channel (non-blocking).
+// assetSigner loads the SSH signer for an asset's private key (if configured).
+func (s *SSHServer) assetSigner(a *Asset) (ssh.Signer, error) {
+	if a.PrivateKeyFile != "" {
+		return parsePrivateKeyFile(a.PrivateKeyFile)
+	}
+	if a.PrivateKey != "" {
+		return parsePrivateKey([]byte(a.PrivateKey))
+	}
+	return nil, fmt.Errorf("no private key configured for asset %q", a.ID)
+}
+
+// --- Event handling ---
+
 func (s *SSHServer) emitEvent(e SessionEvent) {
 	select {
 	case s.events <- e:
@@ -641,7 +699,6 @@ func (s *SSHServer) emitEvent(e SessionEvent) {
 	}
 }
 
-// processEvents handles session events (audit logging, etc.).
 func (s *SSHServer) processEvents() {
 	for ev := range s.events {
 		if s.auditLogger != nil {
@@ -649,7 +706,6 @@ func (s *SSHServer) processEvents() {
 				Username:  ev.Username,
 				SessionID: ev.SessionID,
 				AssetID:   ev.AssetID,
-				AssetName: ev.AssetID,
 				Action:    CommandAction(ev.Type),
 				RawInput:  string(ev.Data),
 			})
@@ -657,7 +713,32 @@ func (s *SSHServer) processEvents() {
 	}
 }
 
-// assetPort returns the port for an asset, defaulting if 0.
+// --- Helpers ---
+
+// parsePtyRequest parses an SSH "pty-req" request payload.
+func parsePtyRequest(payload []byte) *PtyRequest {
+	if len(payload) < 6 {
+		return nil
+	}
+	termLen := int(payload[0])<<8 | int(payload[1])
+	if 2+termLen+1 > len(payload) {
+		return nil
+	}
+	term := string(payload[2 : 2+termLen])
+	rest := payload[2+termLen:]
+	if len(rest) < 16 {
+		return &PtyRequest{Term: term}
+	}
+	width := int(rest[0])<<24 | int(rest[1])<<16 | int(rest[2])<<8 | int(rest[3])
+	height := int(rest[4])<<24 | int(rest[5])<<16 | int(rest[6])<<8 | int(rest[7])
+	return &PtyRequest{
+		Term:    term,
+		Columns: width,
+		Rows:    height,
+	}
+}
+
+// assetPort returns the effective port for an asset.
 func assetPort(a Asset) int {
 	if a.Port > 0 {
 		return a.Port
@@ -673,9 +754,14 @@ func assetUsername(a Asset, sc *SessionContext, s *SSHServer) string {
 	return s.config.DefaultUser
 }
 
-// --- Host key management ---
+// generateSessionID generates a unique session identifier.
+func generateSessionID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return "sess-" + hex.EncodeToString(b)
+}
 
-// loadHostKey loads an SSH private key from a file.
+// loadHostKey loads an SSH host key from a PEM file.
 func loadHostKey(path string) (ssh.Signer, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -684,30 +770,23 @@ func loadHostKey(path string) (ssh.Signer, error) {
 	return ssh.ParsePrivateKey(data)
 }
 
-// generateHostKey generates a new ephemeral RSA/Ed25519 host key.
+// generateHostKey generates a new ephemeral Ed25519 host key.
 func generateHostKey() (ssh.Signer, error) {
-	// Generate an ed25519 key for simplicity
-	return generateEd25519Key()
-}
-
-// generateEd25519Key creates a new ed25519 SSH signer.
-func generateEd25519Key() (ssh.Signer, error) {
-	pub, priv, err := ed25519.GenerateKey()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("generate ed25519 key: %w", err)
 	}
 	return ssh.NewSignerFromKey(priv)
 }
 
-// loadSignerFromKey loads a signer from a private key file, trying multiple formats.
-func loadSignerFromKey(path string) (ssh.Signer, error) {
-	return loadHostKey(path)
-}
-
-// hashString returns a short hash of a string for logging.
-func hashString(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:8])
+// indexByte is a simple byte search helper.
+func indexByte(b []byte, c byte) int {
+	for i, v := range b {
+		if v == c {
+			return i
+		}
+	}
+	return -1
 }
 
 // --- Command scanner for command audit ---
@@ -721,7 +800,7 @@ func newCommandScanner() *commandScanner {
 	return &commandScanner{}
 }
 
-// Feed feeds data into the scanner and returns any complete command lines.
+// Feed feeds data into the scanner and processes any complete command lines.
 func (cs *commandScanner) Feed(data []byte, sc *SessionContext, s *SSHServer) {
 	cs.buf = append(cs.buf, data...)
 	for {
@@ -758,9 +837,8 @@ func (cs *commandScanner) Feed(data []byte, sc *SessionContext, s *SSHServer) {
 					ClientIP:  "",
 				})
 			}
-			// Send block message to user
+			// Notify user
 			msg := fmt.Sprintf("[BLOCKED] Command '%s' is not allowed: %s\n", cmd, bc.Reason)
-			// Note: in a real implementation, we'd need to prevent the command from reaching the target
 			if sc.recording != nil {
 				sc.recording.RecordOutput([]byte(msg), time.Since(sc.StartTime))
 			}
@@ -785,14 +863,4 @@ func (cs *commandScanner) Feed(data []byte, sc *SessionContext, s *SSHServer) {
 			}
 		}
 	}
-}
-
-// indexByte is a simple byte search helper.
-func indexByte(b []byte, c byte) int {
-	for i, v := range b {
-		if v == c {
-			return i
-		}
-	}
-	return -1
 }

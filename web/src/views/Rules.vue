@@ -1,5 +1,5 @@
 <template>
-  <div class="rules-page">
+  <div class="page-wrapper">
     <div class="page-header">
       <h2 class="page-title">规则管理</h2>
       <el-button type="primary" @click="handleCreate">
@@ -10,10 +10,10 @@
       </el-button>
     </div>
 
-    <el-table :data="wafStore.rules" style="width: 100%" height="400" :row-key="row => row.id">
+    <el-table :data="wafStore.rules" class="w-full" height="400" :row-key="row => row.id">
       <el-table-column prop="id" label="规则 ID" width="150" />
       <el-table-column prop="category" label="类别" width="120">
-        <template #scope>
+        <template #default="scope">
           <el-tag :type="getCategoryTag(scope.row.category)">
             {{ scope.row.category }}
           </el-tag>
@@ -22,7 +22,7 @@
       <el-table-column prop="where" label="检测位置" width="150" />
       <el-table-column prop="pattern" label="正则表达式" width="300" show-overflow-tooltip />
       <el-table-column label="操作" width="180" fixed="right">
-        <template #scope>
+        <template #default="scope">
           <el-button size="small" @click="handleEdit(scope.row)">
             编辑
           </el-button>
@@ -179,26 +179,3 @@ const saveRule = async () => {
 }
 </script>
 
-<style scoped>
-.rules-page {
-  padding: 20px;
-}
-
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
-
-.page-title {
-  margin: 0;
-  color: #303133;
-}
-
-.help-text {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 4px;
-}
-</style>

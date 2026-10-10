@@ -3,25 +3,41 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"regexp"
 	"sync"
+
+	"gowaf/bastion"
 )
 
 // APIServer 提供 RESTful API 用于 WAF 配置和监控
+// 当启用 SSH 堰垒机时,也提供堰垒机管理接口
 type APIServer struct {
-	waf      *WAF
-	addr     string
-	server   *http.Server
-	upgradeMu sync.Mutex
+	waf        *WAF
+	addr       string
+	server     *http.Server
+	upgradeMu  sync.Mutex
+	bastion    *bastion.SSHServer // SSH 堰垒机服务器(可选)
+	bastionLog *slog.Logger
 }
 
 // NewAPIServer 创建 API 服务器
 func NewAPIServer(waf *WAF, addr string) *APIServer {
 	return &APIServer{
-		waf:   waf,
-		addr:  addr,
+		waf:  waf,
+		addr: addr,
+	}
+}
+
+// NewAPIServerWithBastion 创建带 SSH 堰垒机的 API 服务器
+func NewAPIServerWithBastion(waf *WAF, addr string, bastionSrv *bastion.SSHServer, log *slog.Logger) *APIServer {
+	return &APIServer{
+		waf:        waf,
+		addr:       addr,
+		bastion:    bastionSrv,
+		bastionLog: log,
 	}
 }
 
@@ -29,22 +45,36 @@ func NewAPIServer(waf *WAF, addr string) *APIServer {
 func (s *APIServer) Start() error {
 	mux := http.NewServeMux()
 
-	// rules 相关接口
+	// WAF rules 相关接口
 	mux.HandleFunc("/api/rules", s.handleRules())
 	mux.HandleFunc("/api/rules/", s.handleRuleByID())
 
-	// 配置相关接口
+	// WAF 配置相关接口
 	mux.HandleFunc("/api/config", s.handleConfig())
 
-	// IP 列表相关接口
+	// WAF IP 列表相关接口
 	mux.HandleFunc("/api/allow", s.handleAllowList())
 	mux.HandleFunc("/api/deny", s.handleDenyList())
 
-	// 监控相关接口
+	// WAF 监控相关接口
 	mux.HandleFunc("/api/metrics", s.handleMetrics())
 
 	// 健康检查
-	mux.HandleFunc("/healthz", s.handleHealth())
+	mux.HandleFunc("/api/healthz", s.handleHealth())
+
+	// SSH 堰垒机管理接口(始终注册,当未启用 SSH 时返回 503 而非 404)
+	if s.bastion != nil {
+		adminAPI := bastion.NewAdminAPI(s.bastion, s.bastionLog)
+		bastionHandler := adminAPI.Handler()
+		mux.Handle("/api/bastion/", http.StripPrefix("/api/bastion", bastionHandler))
+		mux.Handle("/bastion/", http.StripPrefix("/bastion", bastionHandler))
+	} else {
+		bastionNotEnabled := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeJSONErr(w, http.StatusServiceUnavailable, "bastion not enabled: start with -ssh flag")
+		})
+		mux.Handle("/api/bastion/", http.StripPrefix("/api/bastion", bastionNotEnabled))
+		mux.Handle("/bastion/", http.StripPrefix("/bastion", bastionNotEnabled))
+	}
 
 	s.server = &http.Server{
 		Addr:    s.addr,
@@ -69,10 +99,10 @@ type rulesResponse struct {
 }
 
 type RuleDTO struct {
-	ID       string `json:"id"`
-	Category string `json:"category"`
-	Where    string `json:"where"`
-	Pattern  string `json:"pattern"`
+	ID       string   `json:"id"`
+	Category string   `json:"category"`
+	Where    string   `json:"where"`
+	Pattern  string   `json:"pattern"`
 	Keywords []string `json:"keywords,omitempty"`
 }
 
@@ -365,6 +395,13 @@ type ipListResponse struct {
 	IPs []string `json:"ips"`
 }
 
+// writeJSONErr 输出统一的 JSON 错误,方便前端展示具体原因。
+func writeJSONErr(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": msg})
+}
+
 func (s *APIServer) handleAllowList() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -396,7 +433,12 @@ func (s *APIServer) addToAllowList(w http.ResponseWriter, r *http.Request) {
 		IPs []string `json:"ips"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&ips); err != nil {
-		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		writeJSONErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+
+	if len(ips.IPs) == 0 {
+		writeJSONErr(w, http.StatusBadRequest, "ips list is empty")
 		return
 	}
 
@@ -406,7 +448,7 @@ func (s *APIServer) addToAllowList(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			a, err2 := netip.ParseAddr(ipStr)
 			if err2 != nil {
-				http.Error(w, fmt.Sprintf("invalid ip %q: %v", ipStr, err), http.StatusBadRequest)
+				writeJSONErr(w, http.StatusBadRequest, "invalid ip/cidr \""+ipStr+"\"")
 				return
 			}
 			p = netip.PrefixFrom(a, a.BitLen())
@@ -426,7 +468,7 @@ func (s *APIServer) addToAllowList(w http.ResponseWriter, r *http.Request) {
 
 	s.waf.config.Allow = current
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"success": true})
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "count": len(s.waf.config.Allow)})
 }
 
 func (s *APIServer) removeFromAllowList(w http.ResponseWriter, r *http.Request) {
@@ -434,7 +476,7 @@ func (s *APIServer) removeFromAllowList(w http.ResponseWriter, r *http.Request) 
 		IPs []string `json:"ips"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&ips); err != nil {
-		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		writeJSONErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
 
@@ -498,7 +540,12 @@ func (s *APIServer) addToDenyList(w http.ResponseWriter, r *http.Request) {
 		IPs []string `json:"ips"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&ips); err != nil {
-		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		writeJSONErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+
+	if len(ips.IPs) == 0 {
+		writeJSONErr(w, http.StatusBadRequest, "ips list is empty")
 		return
 	}
 
@@ -508,7 +555,7 @@ func (s *APIServer) addToDenyList(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			a, err2 := netip.ParseAddr(ipStr)
 			if err2 != nil {
-				http.Error(w, fmt.Sprintf("invalid ip %q: %v", ipStr, err), http.StatusBadRequest)
+				writeJSONErr(w, http.StatusBadRequest, "invalid ip/cidr \""+ipStr+"\"")
 				return
 			}
 			p = netip.PrefixFrom(a, a.BitLen())
@@ -528,7 +575,7 @@ func (s *APIServer) addToDenyList(w http.ResponseWriter, r *http.Request) {
 
 	s.waf.config.Deny = current
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"success": true})
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "count": len(s.waf.config.Deny)})
 }
 
 func (s *APIServer) removeFromDenyList(w http.ResponseWriter, r *http.Request) {
@@ -536,7 +583,7 @@ func (s *APIServer) removeFromDenyList(w http.ResponseWriter, r *http.Request) {
 		IPs []string `json:"ips"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&ips); err != nil {
-		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		writeJSONErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
 
@@ -574,14 +621,14 @@ func (s *APIServer) handleMetrics() http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		rules := *s.waf.rules.Load()
 		json.NewEncoder(w).Encode(map[string]any{
-			"requests_total":  s.waf.stats.total.Load(),
-			"rule_matched":    s.waf.stats.matched.Load(),
-			"blocked":         s.waf.stats.blocked.Load(),
-			"rate_limited":    s.waf.stats.limited.Load(),
-			"rules_loaded":    len(rules),
-			"mode":            s.waf.config.Mode,
-			"allow_count":     len(s.waf.config.Allow),
-			"deny_count":      len(s.waf.config.Deny),
+			"requests_total": s.waf.stats.total.Load(),
+			"rule_matched":   s.waf.stats.matched.Load(),
+			"blocked":        s.waf.stats.blocked.Load(),
+			"rate_limited":   s.waf.stats.limited.Load(),
+			"rules_loaded":   len(rules),
+			"mode":           s.waf.config.Mode,
+			"allow_count":    len(s.waf.config.Allow),
+			"deny_count":     len(s.waf.config.Deny),
 		})
 	}
 }

@@ -1,15 +1,15 @@
 <template>
-  <div class="ips-page">
+  <div class="page-wrapper">
     <div class="page-header">
       <h2 class="page-title">IP 列表管理</h2>
-      <div>
+      <div class="action-group">
         <el-button type="success" @click="showAddIp('allow')">
           <template #icon>
             <Plus />
           </template>
           添加白名单
         </el-button>
-        <el-button type="danger" style="margin-left: 10px" @click="showAddIp('deny')">
+        <el-button type="danger" @click="showAddIp('deny')">
           <template #icon>
             <Close />
           </template>
@@ -22,10 +22,14 @@
       <el-tab-pane name="allow" label="白名单">
         <div class="ips-section">
           <div class="ips-count">当前 {{ wafStore.allowList.length }} 个 IP/CIDR</div>
-          <el-table :data="wafStore.allowList" style="width: 100%" height="300">
-            <el-table-column prop="ip" label="IP/CIDR" />
+          <el-table :data="wafStore.allowList" class="w-full" height="300">
+            <el-table-column label="IP/CIDR">
+              <template #default="scope">
+                {{ scope.row }}
+              </template>
+            </el-table-column>
             <el-table-column label="操作" width="120" fixed="right">
-              <template #scope>
+              <template #default="scope">
                 <el-button size="small" type="danger" @click="removeFromAllow(scope.row)">
                   删除
                 </el-button>
@@ -39,9 +43,13 @@
         <div class="ips-section">
           <div class="ips-count">当前 {{ wafStore.denyList.length }} 个 IP/CIDR</div>
           <el-table :data="wafStore.denyList" style="width: 100%" height="300">
-            <el-table-column prop="ip" label="IP/CIDR" />
+            <el-table-column label="IP/CIDR">
+              <template #default="scope">
+                {{ scope.row }}
+              </template>
+            </el-table-column>
             <el-table-column label="操作" width="120" fixed="right">
-              <template #scope>
+              <template #default="scope">
                 <el-button size="small" type="danger" @click="removeFromDeny(scope.row)">
                   删除
                 </el-button>
@@ -63,7 +71,7 @@
             :rows="3"
           />
           <div class="help-text">
-            每行一个 IP 或 CIDR，支持 IPv4 和 IPv6
+            每行一个 IP 或 CIDR，可用逗号/分号分隔；支持 IPv4 和 IPv6，支持 # 注释
           </div>
         </el-form-item>
       </el-form>
@@ -80,6 +88,7 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, Close } from '@element-plus/icons-vue'
 import { useWafStore } from '@/stores/waf'
+import { parseIpInput } from '@/utils/ip'
 
 const wafStore = useWafStore()
 
@@ -108,25 +117,32 @@ const showAddIp = (type: 'allow' | 'deny') => {
 }
 
 const addIp = async () => {
-  const ips = addForm.value.ips.split('\n')
-    .map(line => line.trim())
-    .filter(line => line && !line.startsWith('#'))
+  const { valid, invalid } = parseIpInput(addForm.value.ips)
 
-  if (ips.length === 0) {
-    ElMessage.warning('请输入有效的 IP 或 CIDR')
+  if (valid.length === 0) {
+    if (invalid.length > 0) {
+      ElMessage.error(`没有有效的 IP/CIDR：${invalid.join('，')}`)
+    } else {
+      ElMessage.warning('请输入有效的 IP 或 CIDR')
+    }
     return
+  }
+
+  if (invalid.length > 0) {
+    ElMessage.warning(`${invalid.length} 个条目无效，已忽略：${invalid.join('，')}`)
   }
 
   try {
     if (addType.value === 'allow') {
-      await wafStore.addToAllowList(ips)
+      await wafStore.addToAllowList(valid)
     } else {
-      await wafStore.addToDenyList(ips)
+      await wafStore.addToDenyList(valid)
     }
-    ElMessage.success('IP 已添加')
+    ElMessage.success(`已添加 ${valid.length} 个 IP/CIDR`)
     showDialog.value = false
-  } catch (error) {
-    ElMessage.error('添加失败')
+  } catch (error: any) {
+    const detail = error?.response?.data?.error || error?.response?.data || error?.message
+    ElMessage.error(typeof detail === 'string' ? detail : '添加失败，请检查输入后重试')
   }
 }
 
@@ -154,37 +170,15 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.ips-page {
-  padding: 20px;
-}
-
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
-
-.page-title {
-  margin: 0;
-  color: #303133;
-}
-
 .ips-section {
   padding: 10px;
 }
 
 .ips-count {
   font-size: 14px;
-  color: #606266;
+  color: var(--text-secondary);
   margin-bottom: 10px;
   padding-bottom: 10px;
-  border-bottom: 1px solid #ebeef5;
-}
-
-.help-text {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 4px;
+  border-bottom: 1px solid var(--border-color);
 }
 </style>

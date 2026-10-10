@@ -117,23 +117,14 @@ func (r *SessionRecord) RecordEvent(data []byte, isInput bool, elapsed time.Dura
 	if r.Format.closed {
 		return
 	}
-	event := [3]interface{}{
-		fmt.Sprintf("%.6f", elapsed.Seconds()), // delay since last event
-		map[string]string{"i": string(data)},  // event data
-		func() string {
-			if isInput {
-				return "i"
-			}
-			return "o"
-		}(),
+	// Asciicast v2 format: [time_since_start, "o"/"i", data_string]
+	eventType := "o" // output
+	if isInput {
+		eventType = "i" // input
 	}
-	// Actually, asciicast v2 format is simpler: [time, type, data]
-	// Let's use the standard format: [delay, "i"/"o", data]
-	// But the standard format is: [time_since_start, "o"/"i", string]
-	// Let's keep it simple and correct
-
 	eventBytes, err := json.Marshal([]interface{}{
 		fmt.Sprintf("%.6f", elapsed.Seconds()),
+		eventType,
 		string(data),
 	})
 	if err != nil {
@@ -328,13 +319,13 @@ func NewRawRecorder(dir, sessionID, username string) (*RawRecorder, error) {
 func (r *RawRecorder) Append(data []byte, isInput bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	ts := time.Since(r.start).Seconds()
+	ts := uint32(time.Since(r.start).Milliseconds())
 	// Write a simple binary format: [4-byte timestamp + 1-byte type + 4-byte length + data]
 	r.file.Write([]byte{
-		byte(ts),
-		byte(ts >> 8),
-		byte(ts >> 16),
 		byte(ts >> 24),
+		byte(ts >> 16),
+		byte(ts >> 8),
+		byte(ts),
 		func() byte {
 			if isInput {
 				return 1

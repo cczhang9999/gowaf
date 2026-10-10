@@ -1,0 +1,306 @@
+/* ===== Theme variables ===== */
+:root {
+  /* Light theme colors */
+  --el-color-primary: #409eff;
+  --el-color-primary-darken: #3378c8;
+  
+  /* Background colors */
+  --background-primary: #f5f7fa;
+  --background-card: #ffffff;
+  --background-header: #ffffff;
+  --background-sidebar: #2c3e50;
+  
+  /* Text colors */
+  --text-primary: #303133;
+  --text-secondary: #606266;
+  --text-disabled: #909399;
+  
+  /* Border colors */
+  --border-color: #e4e7ed;
+  
+  /* Shadow */
+  --shadow-card: 0 2px 12px 0 rgba(0, 0, 0, 0.06);
+  --shadow-header: 0 1px 4px rgba(0, 0, 0, 0.04);
+}
+
+/* Dark theme variables */
+.dark-theme {
+  --el-color-primary: #409eff;
+  --el-color-primary-darken: #3378c8;
+  
+  /* Background colors */
+  --background-primary: #1d1f21;
+  --background-card: #262a2e;
+  --background-header: #262a2e;
+  --background-sidebar: #1a1d23;
+  
+  /* Text colors */
+  --text-primary: #e4e7ed;
+  --text-secondary: #a0a0a0;
+  --text-disabled: #7a7a7a;
+  
+  /* Border colors */
+  --border-color: #444a53;
+  
+  /* Shadow */
+  --shadow-card: 0 2px 12px 0 rgba(0, 0, 0, 0.3);
+  --shadow-header: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+/* ===== Global base & reset ===== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
+  font-size: 14px;
+  color: var(--text-primary);
+  background-color: var(--background-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.3s, color 0.3s;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+}
+
+/* ===== Shared page scaffolding ===== */
+.page-wrapper {
+  padding: 20px;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 20px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.action-group {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* ===== Cards ===== */
+.card-title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.stats-card {
+  border-radius: 8px;
+  box-shadow: var(--shadow-card);
+}
+
+.gap-card {
+  margin-top: 20px;
+}
+
+/* ===== Form helpers ===== */
+.help-text {
+  font-size: 12px;
+  color: var(--text-disabled);
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+.unit {
+  margin-left: 8px;
+  color: var(--text-secondary);
+}
+
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ===== Layout ===== */
+.main-content {
+  background-color: var(--background-primary);
+}
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 20px 8px 0;
+  font-size: 13px;
+  color: var(--text-disabled);
+}
+
+.breadcrumb-item {
+  color: var(--text-disabled);
+  cursor: pointer;
+}
+
+.breadcrumb-item:last-child {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.breadcrumb-separator {
+  color: var(--border-color);
+}
+
+/* ===== Stats ===== */
+.stat-card {
+  text-align: center;
+  padding: 12px 0;
+}
+
+/* ===== Chart containers ===== */
+.chart-box {
+  height: 300px;
+  width: 100%;
+}
+
+/* ===== Table helpers ===== */
+.w-full {
+  width: 100%;
+}
+
+.table-actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* ===== Theme toggle button ===== */
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.3s;
+  color: var(--text-secondary);
+}
+
+.theme-toggle:hover {
+  background-color: var(--border-color);
+}
+
+.theme-toggle.active {
+  color: #409eff;
+}
+
+/* ===== Element Plus dark theme overrides ===== */
+.el-menu {
+  background-color: var(--background-sidebar) !important;
+}
+
+.el-menu-item {
+  color: var(--text-secondary) !important;
+}
+
+.el-menu-item:hover,
+.el-menu-item.is-active {
+  background-color: rgba(64, 159, 255, 0.15) !important;
+  color: var(--text-primary) !important;
+}
+
+.el-menu--collapse .el-menu-item {
+  text-align: center;
+}
+
+.el-header {
+  background-color: var(--background-header) !important;
+  border-bottom: 1px solid var(--border-color) !important;
+}
+
+.el-main {
+  background-color: var(--background-primary) !important;
+}
+
+.el-card {
+  background-color: var(--background-card) !important;
+  border-color: var(--border-color) !important;
+}
+
+.el-divider--border-border {
+  border-color: var(--border-color) !important;
+}
+
+.el-input,
+.el-input__inner {
+  background-color: var(--background-primary) !important;
+  color: var(--text-primary) !important;
+}
+
+.el-input::placeholder,
+.el-input__inner::placeholder {
+  color: var(--text-disabled) !important;
+}
+
+.el-select,
+.el-select__dropdown-wrap {
+  background-color: var(--background-primary) !important;
+  color: var(--text-primary) !important;
+}
+
+.el-input-number,
+.el-countdown {
+  background-color: var(--background-primary) !important;
+}
+
+.el-tag {
+  background-color: var(--background-card) !important;
+}
+
+.el-statistic {
+  color: var(--text-primary);
+}
+
+.el-table,
+.el-table th,
+.el-table td {
+  color: var(--text-primary);
+}
+
+.el-table th {
+  background-color: rgba(128, 128, 128, 0.05) !important;
+}
+
+/* Chart.js dark theme */
+.chart-box .chartjs-chart {
+  background-color: transparent;
+}
+
+/* ===== Responsive adjustments ===== */
+@media (max-width: 768px) {
+  .nav-aside {
+    width: 60px !important;
+  }
+  
+  .logo h3 {
+    display: none;
+  }
+  
+  .menu-section-label {
+    padding: 8px 14px 4px;
+  }
+}

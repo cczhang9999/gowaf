@@ -186,3 +186,4 @@ Aho-Corasick 筛关键字,再跑正则)。
 - 没有语义级检测(libinjection 那类 tokenizer),也没有 OWASP CRS 那种异常评分机制
 - 需要真正的生产方案时,可以看 Go 写的 OWASP Coraza(兼容 ModSecurity 规则语法和 CRS),
   它同样大量用到上面这些 Go 特性# gowaf
+# gowaf

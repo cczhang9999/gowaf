@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"gowaf/bastion"
 )
 
 var (
@@ -41,6 +43,20 @@ func parsePrefixes(s string) ([]netip.Prefix, error) {
 		out = append(out, netip.PrefixFrom(a, a.BitLen()))
 	}
 	return out, nil
+}
+
+// defaultBannedCommands returns a set of commonly dangerous commands to block.
+func defaultBannedCommands() []bastion.BannedCommand {
+	return []bastion.BannedCommand{
+		{ID: "ban-001", Pattern: "rm -rf /", Reason: "destructive command", Enabled: true},
+		{ID: "ban-002", Pattern: "mkfs", Reason: "filesystem format", Enabled: true},
+		{ID: "ban-003", Pattern: "dd if=/dev/zero", Reason: "disk overwrite", Enabled: true},
+		{ID: "ban-004", Pattern: ":(){:|:&};:", Reason: "fork bomb", Enabled: true},
+		{ID: "ban-005", Pattern: "chmod 777 /", Reason: "dangerous permission change", Enabled: true},
+		{ID: "ban-006", Pattern: "shutdown", Reason: "system shutdown", Enabled: true},
+		{ID: "ban-007", Pattern: "reboot", Reason: "system reboot", Enabled: true},
+		{ID: "ban-008", Pattern: "init 0", Reason: "system halt", Enabled: true},
+	}
 }
 
 // buildProxy 构造反向代理,负责把 WAF 放行的请求转发到源站。
@@ -90,6 +106,17 @@ func main() {
 		deny      = flag.String("deny", "", "黑名单 IP/CIDR,逗号分隔")
 		banStrike = flag.Int("ban-strikes", 5, "1 分钟内违规多少次自动封禁,0 关闭")
 		banFor    = flag.Duration("ban-for", 10*time.Minute, "自动封禁时长")
+
+		// 堡垒机(SSH)模式:当 -ssh 启用时,同时运行 SSH 堡垒机
+		sshEnable    = flag.Bool("ssh", false, "启用 SSH 堰垒机模式(在 WAF 之外同时监听 SSH)")
+		sshListen    = flag.String("ssh-listen", ":2222", "SSH 堰垒机监听地址")
+		sshHostKey   = flag.String("ssh-host-key", "ssh_host_key", "SSH 主机密钥文件路径(不存在则自动生成)")
+		sshRecordDir = flag.String("ssh-recordings", "recordings", "SSH 会话录像存储目录")
+		sshAuditLog  = flag.String("ssh-audit-log", "audit.log", "SSH 审计日志路径")
+		sshDefaultUser = flag.String("ssh-default-user", "root", "默认后端 SSH 用户名")
+		sshDefaultPort = flag.Int("ssh-default-port", 22, "默认后端 SSH 端口")
+		sshAdminUser = flag.String("ssh-admin-user", "admin", "初始管理员用户名")
+		sshAdminPass = flag.String("ssh-admin-pass", "ChangeMe!2024", "初始管理员密码")
 	)
 	flag.Parse()
 
@@ -165,10 +192,52 @@ func main() {
 		_ = srv.Shutdown(sctx)
 	}()
 
-	// 启动 API 服务器
+	// 堡垒机管理面始终创建,这样 /api/bastion/users 等管理接口在未加 -ssh
+	// 时也能返回数据(默认管理员)。-ssh 只控制是否监听 SSH 端口。
+	bastionCfg := &bastion.BastionConfig{
+		SSHListenAddr:      *sshListen,
+		APIListenAddr:      *apiAddr,
+		HostKeyPath:        *sshHostKey,
+		RecordingDir:       *sshRecordDir,
+		AuditLogPath:       *sshAuditLog,
+		DefaultUser:        *sshDefaultUser,
+		DefaultPort:        *sshDefaultPort,
+		MaxSessions:        100,
+		SessionIdleTimeout: 30 * time.Minute,
+		BannerMsg:          "=== GoWAF Bastion Host ===\nAuthorized access only.\n",
+	}
+	bastionSrv, bErr := bastion.NewSSHServer(bastionCfg, log)
+	if bErr != nil {
+		fatal("create bastion server", bErr)
+	}
+
+	adminUser := &bastion.User{
+		Username:      *sshAdminUser,
+		PasswordPlain: *sshAdminPass,
+		Role:          bastion.RoleAdmin,
+		Comment:       "Initial admin user",
+		CreatedAt:     time.Now(),
+	}
+	if err := bastionSrv.AddUser(adminUser); err != nil {
+		fatal("create admin user", err)
+	}
+
+	for _, bc := range defaultBannedCommands() {
+		bastionSrv.AuditStore().AddBannedCommand(bc)
+	}
+
+	if *sshEnable {
+		go func() {
+			if err := bastionSrv.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("bastion ssh server error", "err", err)
+			}
+		}()
+	}
+
+	// 启动 API 服务器(带 WAF + 堰垒机管理接口)
 	var apiServer *APIServer
 	if *apiAddr != "0" {
-		apiServer = NewAPIServer(w, *apiAddr)
+		apiServer = NewAPIServerWithBastion(w, *apiAddr, bastionSrv, log)
 		go func() {
 			if err := apiServer.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server error", "err", err)
@@ -176,7 +245,8 @@ func main() {
 		}()
 	}
 
-	log.Info("waf started", "listen", *listen, "upstream", target.String(), "mode", *mode, "rules", len(rules))
+	log.Info("waf started", "listen", *listen, "upstream", target.String(), "mode", *mode, "rules", len(rules),
+		"bastion", *sshEnable)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatal("server", err)
 	}
