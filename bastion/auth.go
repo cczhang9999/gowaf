@@ -28,17 +28,21 @@ const (
 
 // User is a bastion host user.
 type User struct {
-	Username      string   `json:"username"`
-	PasswordHash  []byte   `json:"-"`            // bcrypt hash of password
-	PasswordPlain string   `json:"password,omitempty"` // set on create/update, then hashed
-	PublicKey     string   `json:"public_key,omitempty"` // SSH public key for key-based auth
-	Role          UserRole `json:"role"`
-	Assets        []string `json:"assets,omitempty"`     // asset IDs this user can access; empty = all
-	Comment       string   `json:"comment,omitempty"`
+	// ID is the users1 primary key; 0 when the user only exists in memory.
+	ID            uint      `json:"id"`
+	Username      string    `json:"username"`
+	PasswordHash  []byte    `json:"-"`                    // bcrypt hash of password
+	PasswordPlain string    `json:"password,omitempty"`   // set on create/update, then hashed
+	PublicKey     string    `json:"public_key,omitempty"` // SSH public key for key-based auth
+	Role          UserRole  `json:"role"`
+	Assets        []string  `json:"assets,omitempty"` // asset IDs this user can access; empty = all
+	Comment       string    `json:"comment,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 
 // AuthStore manages users and their permissions in a thread-safe manner.
+// It is the in-memory fallback used when no MySQL DSN is configured;
+// DatabaseAuthStore persists the same users into the users1 table.
 type AuthStore struct {
 	mu    sync.RWMutex
 	users map[string]*User
@@ -112,8 +116,13 @@ func (s *AuthStore) AuthenticatePublicKey(username string, pubKey ssh.PublicKey)
 }
 
 // CanAccessAsset checks if a user can access a given asset ID.
-// Admin and auditor roles can access all assets.
 func (s *AuthStore) CanAccessAsset(u *User, assetID string) bool {
+	return canAccessAsset(u, assetID)
+}
+
+// canAccessAsset is the shared RBAC rule for both the in-memory and the
+// database-backed stores. Admin and auditor roles can access all assets.
+func canAccessAsset(u *User, assetID string) bool {
 	if u.Role == RoleAdmin || u.Role == RoleAuditor {
 		return true
 	}
@@ -156,12 +165,52 @@ func (s *AuthStore) GetUser(username string) (*User, bool) {
 	return &copy, true
 }
 
+// GetUserByID retrieves a user by primary key (secrets stripped).
+// The in-memory store has no real IDs, so this falls back to a scan over
+// the stored users, which is only meaningful for users loaded from users1.
+func (s *AuthStore) GetUserByID(id uint) (*User, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, u := range s.users {
+		if u.ID == id {
+			copy := *u
+			copy.PasswordHash = nil
+			copy.PasswordPlain = ""
+			return &copy, true
+		}
+	}
+	return nil, false
+}
+
 // HasUser checks if a user exists.
 func (s *AuthStore) HasUser(username string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	_, ok := s.users[username]
 	return ok
+}
+
+// UpdateUser updates an existing user in the store.
+func (s *AuthStore) UpdateUser(u *User) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing, ok := s.users[u.Username]
+	if !ok {
+		return fmt.Errorf("user %q not found", u.Username)
+	}
+	// Keep the stored password when the caller only edits other fields.
+	if len(u.PasswordHash) == 0 && existing != nil {
+		u.PasswordHash = existing.PasswordHash
+	}
+	if u.ID == 0 && existing != nil {
+		u.ID = existing.ID
+	}
+	if u.CreatedAt.IsZero() && existing != nil {
+		u.CreatedAt = existing.CreatedAt
+	}
+	s.users[u.Username] = u
+	return nil
 }
 
 // --- SSH key helpers ---

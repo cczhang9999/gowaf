@@ -39,6 +39,10 @@ type BastionConfig struct {
 
 	// BannerMsg is sent to clients after authentication.
 	BannerMsg string `json:"banner_msg"`
+
+	// MySQLDSN is the MySQL data source name for user persistence.
+	// If empty, users are stored in memory (lost on restart).
+	MySQLDSN string `json:"mysql_dsn,omitempty"`
 }
 
 // DefaultConfig returns a sensible default BastionConfig for development.

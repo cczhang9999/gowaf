@@ -122,6 +122,39 @@ pnpm dev
 | `/api/bastion/config` | GET | 获取堰垒机配置 |
 | `/api/bastion/config` | PUT | 更新堰垒机配置 |
 
+### 用户持久化(users1 表)
+
+堡垒机用户默认只存在内存里,进程重启即丢。加上 `-mysql-dsn` 后,
+`/api/bastion/users` 的增删改查直接落到 MySQL 的 **`users1`** 表:
+
+```bash
+# 独立堡垒机
+./bastion -api-listen :8081 \
+  -mysql-dsn 'user:pass@tcp(127.0.0.1:3306)/myapp?charset=utf8mb4&parseTime=True&loc=Local'
+
+# WAF + 堡垒机管理面(同一个 API 地址)
+./gowaf -listen :8080 -upstream http://127.0.0.1:9000 -api-addr :8081 \
+  -mysql-dsn 'user:pass@tcp(127.0.0.1:3306)/myapp?charset=utf8mb4&parseTime=True&loc=Local'
+```
+
+建表脚本:`sql/init_users.sql`(启动时 GORM `AutoMigrate` 也会自动建表)。
+接口里的 `{id}` 既可以是 `username`,也可以是 `users1.id`;`GET /api/bastion/healthz`
+返回的 `user_store` 会显示当前是 `mysql(users1)` 还是 `memory`。
+
+| users1 列 | 接口字段 | 说明 |
+|---|---|---|
+| `id` | `id` | 主键,`/users/{id}` 可直接用 |
+| `username` | `username` | 唯一,`/users/{username}` 也可用 |
+| `password` | — | bcrypt hash,任何响应里都不返回 |
+| `role` | `role` | `admin` / `user` / `auditor` |
+| `public_key` | `public_key` | SSH 公钥登录 |
+| `assets` | `assets` | JSON 数组;空数组表示可访问全部资产 |
+| `comment` | `comment` | 备注 |
+| `created_at` / `updated_at` | `created_at` | 时间戳 |
+
+> 表名固定是 `users1`。同一个库里可能还有业务方的 `users`(`id/name/email`),
+> 两者互不相干,不要混用。
+
 ### 启动 SSH 堰垒机
 
 ```bash

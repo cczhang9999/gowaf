@@ -82,7 +82,7 @@ func (a *AdminAPI) handleUsers() http.HandlerFunc {
 }
 
 func (a *AdminAPI) listUsers(w http.ResponseWriter, r *http.Request) {
-	users := a.Server.AuthStore().ListUsers()
+	users := a.Server.ListUsers()
 	a.json(w, http.StatusOK, usersResponse{Users: users, Count: len(users)})
 }
 
@@ -132,7 +132,7 @@ func (a *AdminAPI) createUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid role; must be admin, user or auditor", http.StatusBadRequest)
 		return
 	}
-	if a.Server.AuthStore().HasUser(req.Username) {
+	if a.Server.HasUser(req.Username) {
 		http.Error(w, "user already exists", http.StatusConflict)
 		return
 	}
@@ -146,11 +146,11 @@ func (a *AdminAPI) createUser(w http.ResponseWriter, r *http.Request) {
 		Comment:       req.Comment,
 		CreatedAt:     time.Now(),
 	}
-	if err := a.Server.AuthStore().Register(u); err != nil {
-		http.Error(w, "register user: "+err.Error(), http.StatusInternalServerError)
+	if err := a.Server.AddUser(u); err != nil {
+		http.Error(w, "create user: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.json(w, http.StatusCreated, map[string]any{"success": true, "username": req.Username})
+	a.json(w, http.StatusCreated, map[string]any{"success": true, "id": u.ID, "username": req.Username})
 }
 
 func (a *AdminAPI) handleUserByID() http.HandlerFunc {
@@ -174,12 +174,24 @@ func (a *AdminAPI) handleUserByID() http.HandlerFunc {
 }
 
 func (a *AdminAPI) getUser(w http.ResponseWriter, r *http.Request, id string) {
-	u, ok := a.Server.AuthStore().GetUser(id)
+	u, ok := a.resolveUser(id)
 	if !ok {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
 	a.json(w, http.StatusOK, u)
+}
+
+// resolveUser looks a user up by username first, then by the numeric users1
+// primary key, so /api/bastion/users/{id} accepts both forms.
+func (a *AdminAPI) resolveUser(idOrName string) (*User, bool) {
+	if u, ok := a.Server.GetUser(idOrName); ok {
+		return u, true
+	}
+	if n, err := strconv.ParseUint(idOrName, 10, 64); err == nil {
+		return a.Server.GetUserByID(uint(n))
+	}
+	return nil, false
 }
 
 // hashPassword hashes a password using bcrypt.
@@ -204,23 +216,20 @@ func validRole(r UserRole) bool {
 }
 
 func (a *AdminAPI) updateUser(w http.ResponseWriter, r *http.Request, id string) {
+	// Get existing user (by username or users1 primary key)
+	actual, ok := a.resolveUser(id)
+	if !ok {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+
 	var req UserUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Lock once across the existence check and the mutation so the user
-	// cannot be deleted between reading and updating.
-	a.Server.AuthStore().mu.Lock()
-	defer a.Server.AuthStore().mu.Unlock()
-
-	actual, exists := a.Server.AuthStore().users[id]
-	if !exists {
-		http.Error(w, "user not found", http.StatusNotFound)
-		return
-	}
-
+	// Update password if provided
 	if req.Password != nil {
 		if *req.Password == "" {
 			http.Error(w, "password cannot be empty when changing it", http.StatusBadRequest)
@@ -262,16 +271,26 @@ func (a *AdminAPI) updateUser(w http.ResponseWriter, r *http.Request, id string)
 		// Comment is a pointer so an empty string clears the field.
 		actual.Comment = *req.Comment
 	}
+
+	// Save updated user
+	if err := a.Server.UpdateUser(actual); err != nil {
+		http.Error(w, "update user: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	a.json(w, http.StatusOK, map[string]any{"success": true})
 }
 
 func (a *AdminAPI) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
-	if !a.Server.AuthStore().HasUser(id) {
+	actual, ok := a.resolveUser(id)
+	if !ok {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
-	a.Server.AuthStore().Unregister(id)
-	a.json(w, http.StatusOK, map[string]any{"success": true})
+	if err := a.Server.RemoveUser(actual.Username); err != nil {
+		http.Error(w, "delete user: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.json(w, http.StatusOK, map[string]any{"success": true, "username": actual.Username})
 }
 
 // --- Asset management ---
@@ -740,6 +759,7 @@ func (a *AdminAPI) handleHealth(w http.ResponseWriter, r *http.Request) {
 	a.json(w, http.StatusOK, map[string]any{
 		"status":          "ok",
 		"ssh_listen":      a.Server.config.SSHListenAddr,
+		"user_store":      a.Server.UserStoreName(),
 		"uptime":          time.Since(time.Now()).String(),
 		"active_sessions": len(a.Server.ActiveSessions()),
 	})
@@ -754,7 +774,8 @@ func (a *AdminAPI) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"total_events":    len(events),
 		"by_action":       counts,
 		"total_assets":    len(a.Server.AssetStore().All()),
-		"total_users":     len(a.Server.AuthStore().ListUsers()),
+		"total_users":     len(a.Server.ListUsers()),
+		"user_store":      a.Server.UserStoreName(),
 	})
 }
 

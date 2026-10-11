@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"gorm.io/gorm"
 )
 
 // SessionEvent is emitted for every notable session lifecycle event.
@@ -43,6 +44,7 @@ type SSHServer struct {
 	sshConfig *ssh.ServerConfig
 
 	authStore    *AuthStore
+	dbAuthStore  *DatabaseAuthStore // Option for MySQL-based user persistence
 	assetStore   *AssetStore
 	auditLogger  *AuditLogger
 	auditStore   *AuditStore
@@ -69,9 +71,9 @@ type SessionContext struct {
 	Asset     *Asset
 	StartTime time.Time
 
-	recording  *SessionRecord
-	logger     *AuditLogger
-	audit      *AuditStore
+	recording *SessionRecord
+	logger    *AuditLogger
+	audit     *AuditStore
 
 	termWidth  int
 	termHeight int
@@ -92,6 +94,12 @@ type PtyRequest struct {
 
 // NewSSHServer creates a new bastion SSH server.
 func NewSSHServer(cfg *BastionConfig, log *slog.Logger) (*SSHServer, error) {
+	return NewSSHServerWithDB(cfg, log, nil)
+}
+
+// NewSSHServerWithDB creates a new bastion SSH server with optional MySQL database for user persistence.
+// If db is provided, users will be stored in the database; otherwise, they are stored in memory.
+func NewSSHServerWithDB(cfg *BastionConfig, log *slog.Logger, db *gorm.DB) (*SSHServer, error) {
 	authStore := NewAuthStore()
 	assetStore := NewAssetStore()
 	recorder := NewSessionRecorder(cfg.RecordingDir)
@@ -118,6 +126,16 @@ func NewSSHServer(cfg *BastionConfig, log *slog.Logger) (*SSHServer, error) {
 		srv.auditLogger = auditLogger
 	}
 
+	// Initialize database-backed auth store if MySQL DSN is configured
+	if db != nil {
+		dbAuthStore, err := NewDatabaseAuthStore(db)
+		if err != nil {
+			return nil, fmt.Errorf("create database auth store: %w", err)
+		}
+		srv.dbAuthStore = dbAuthStore
+		log.Info("database-backed user persistence enabled")
+	}
+
 	return srv, nil
 }
 
@@ -133,6 +151,17 @@ func (s *SSHServer) SetAssets(assets []Asset) {
 
 // SetUsers replaces all users (used by API management).
 func (s *SSHServer) SetUsers(users []*User) {
+	if s.dbAuthStore != nil {
+		// Upsert into users1; rows that are absent from the list are left alone
+		// so a bulk load cannot silently drop users that were added elsewhere.
+		for _, u := range users {
+			if err := s.dbAuthStore.Register(u); err != nil {
+				s.logger.Warn("failed to set user in database", "user", u.Username, "err", err)
+			}
+		}
+		return
+	}
+
 	s.authStore.mu.Lock()
 	defer s.authStore.mu.Unlock()
 	s.authStore.users = make(map[string]*User, len(users))
@@ -143,12 +172,27 @@ func (s *SSHServer) SetUsers(users []*User) {
 
 // AddUser adds a single user.
 func (s *SSHServer) AddUser(u *User) error {
+	if s.dbAuthStore != nil {
+		return s.dbAuthStore.Register(u)
+	}
 	return s.authStore.Register(u)
 }
 
 // RemoveUser removes a user.
-func (s *SSHServer) RemoveUser(username string) {
+func (s *SSHServer) RemoveUser(username string) error {
+	if s.dbAuthStore != nil {
+		return s.dbAuthStore.Unregister(username)
+	}
 	s.authStore.Unregister(username)
+	return nil
+}
+
+// UpdateUser updates an existing user.
+func (s *SSHServer) UpdateUser(u *User) error {
+	if s.dbAuthStore != nil {
+		return s.dbAuthStore.UpdateUser(u)
+	}
+	return s.authStore.UpdateUser(u)
 }
 
 // AddAsset adds a single asset.
@@ -172,9 +216,60 @@ func (s *SSHServer) ActiveSessions() []*SessionContext {
 	return result
 }
 
-// AuthStore returns the authentication store.
+// AuthStore returns the in-memory authentication store.
+// When a MySQL DSN is configured this store is NOT the source of truth for
+// users; use GetUser/GetUserByID/ListUsers/HasUser/UpdateUser instead, which
+// dispatch to the users1 table.
 func (s *SSHServer) AuthStore() *AuthStore {
 	return s.authStore
+}
+
+// GetUser returns a user by username.
+func (s *SSHServer) GetUser(username string) (*User, bool) {
+	if s.dbAuthStore != nil {
+		return s.dbAuthStore.GetUser(username)
+	}
+	return s.authStore.GetUser(username)
+}
+
+// GetUserByID returns a user by primary key (users1.id).
+func (s *SSHServer) GetUserByID(id uint) (*User, bool) {
+	if s.dbAuthStore != nil {
+		return s.dbAuthStore.GetUserByID(id)
+	}
+	return s.authStore.GetUserByID(id)
+}
+
+// UserStoreName reports where users are persisted, e.g. "mysql(users1)".
+func (s *SSHServer) UserStoreName() string {
+	if s.dbAuthStore != nil {
+		return "mysql(users1)"
+	}
+	return "memory"
+}
+
+// ListUsers returns all users.
+func (s *SSHServer) ListUsers() []*User {
+	if s.dbAuthStore != nil {
+		return s.dbAuthStore.ListUsers()
+	}
+	return s.authStore.ListUsers()
+}
+
+// HasUser checks if a user exists.
+func (s *SSHServer) HasUser(username string) bool {
+	if s.dbAuthStore != nil {
+		return s.dbAuthStore.HasUser(username)
+	}
+	return s.authStore.HasUser(username)
+}
+
+// CanAccessAsset checks if a user can access a specific asset.
+func (s *SSHServer) CanAccessAsset(u *User, assetID string) bool {
+	if s.dbAuthStore != nil {
+		return s.dbAuthStore.CanAccessAsset(u, assetID)
+	}
+	return s.authStore.CanAccessAsset(u, assetID)
 }
 
 // AssetStore returns the asset store.
@@ -246,7 +341,16 @@ func (s *SSHServer) Start(ctx context.Context) error {
 // passwordCallback authenticates users via SSH password auth.
 func (s *SSHServer) passwordCallback(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 	username := conn.User()
-	user, err := s.authStore.Authenticate(username, string(password))
+
+	// Use database-backed auth store if available
+	var user *User
+	var err error
+	if s.dbAuthStore != nil {
+		user, err = s.dbAuthStore.Authenticate(username, string(password))
+	} else {
+		user, err = s.authStore.Authenticate(username, string(password))
+	}
+
 	if err != nil {
 		s.logger.Warn("password auth failed", "user", username, "client", conn.RemoteAddr().String())
 		return nil, fmt.Errorf("access denied")
@@ -262,7 +366,16 @@ func (s *SSHServer) passwordCallback(conn ssh.ConnMetadata, password []byte) (*s
 // publicKeyCallback authenticates users via SSH public key auth.
 func (s *SSHServer) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 	username := conn.User()
-	user, err := s.authStore.AuthenticatePublicKey(username, key)
+
+	// Use database-backed auth store if available
+	var user *User
+	var err error
+	if s.dbAuthStore != nil {
+		user, err = s.dbAuthStore.AuthenticatePublicKey(username, key)
+	} else {
+		user, err = s.authStore.AuthenticatePublicKey(username, key)
+	}
+
 	if err != nil {
 		s.logger.Warn("public key auth failed", "user", username, "client", conn.RemoteAddr().String())
 		return nil, fmt.Errorf("access denied")
@@ -303,7 +416,16 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn) {
 	}
 
 	username := newConn.User()
-	user, ok := s.authStore.GetUser(username)
+
+	// Get user from appropriate store
+	var user *User
+	var ok bool
+	if s.dbAuthStore != nil {
+		user, ok = s.dbAuthStore.GetUser(username)
+	} else {
+		user, ok = s.authStore.GetUser(username)
+	}
+
 	if !ok {
 		s.logger.Warn("authenticated user not in store", "username", username)
 		return
@@ -342,14 +464,25 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn) {
 	// Handle global requests (keepalive, etc.)
 	go ssh.DiscardRequests(reqs)
 
-	// Handle the first channel (typically a session channel)
+	// Handle the first channel (typically a session channel).
+	// chans is closed when the client disconnects without opening one
+	// (e.g. a bare handshake or a port scanner); a closed channel yields a
+	// nil interface, which must not reach handleSessionChannel.
 	select {
-	case ch := <-chans:
+	case ch, ok := <-chans:
+		if !ok {
+			s.logger.Info("client disconnected before opening a session channel", "user", username, "client", clientAddr)
+			return
+		}
 		s.handleSessionChannel(ctx, ch, sc, newConn, clientAddr)
 	default:
 		// No channels in the first few ms; wait briefly
 		select {
-		case ch := <-chans:
+		case ch, ok := <-chans:
+			if !ok {
+				s.logger.Info("client disconnected before opening a session channel", "user", username, "client", clientAddr)
+				return
+			}
 			s.handleSessionChannel(ctx, ch, sc, newConn, clientAddr)
 		case <-time.After(5 * time.Second):
 			s.logger.Warn("no session channel received, closing connection", "user", username)
@@ -379,6 +512,10 @@ func (s *SSHServer) unregisterSession(id string) {
 
 // handleSessionChannel processes a session channel from the authenticated connection.
 func (s *SSHServer) handleSessionChannel(ctx context.Context, ch ssh.NewChannel, sc *SessionContext, conn *ssh.ServerConn, clientAddr string) {
+	if ch == nil || sc == nil {
+		// The client went away before offering a channel.
+		return
+	}
 	if ch.ChannelType() != "session" {
 		ch.Reject(ssh.UnknownChannelType, "unknown channel type")
 		return
@@ -396,7 +533,13 @@ func (s *SSHServer) handleSessionChannel(ctx context.Context, ch ssh.NewChannel,
 	assets := s.assetStore.All()
 	var accessible []Asset
 	for i := range assets {
-		if s.authStore.CanAccessAsset(sc.User, assets[i].ID) {
+		var canAccess bool
+		if s.dbAuthStore != nil {
+			canAccess = s.dbAuthStore.CanAccessAsset(sc.User, assets[i].ID)
+		} else {
+			canAccess = s.authStore.CanAccessAsset(sc.User, assets[i].ID)
+		}
+		if canAccess {
 			accessible = append(accessible, assets[i])
 		}
 	}

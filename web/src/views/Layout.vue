@@ -195,7 +195,7 @@ onMounted(() => {
 
 .logo h3 {
   font-weight: normal;
-  color: #ffffff;
+  color: var(--sidebar-brand-text);
   padding: 15px;
   margin: 0;
 }
@@ -217,7 +217,7 @@ onMounted(() => {
 .menu-section-label {
   padding: 8px 14px 4px;
   font-size: 11px;
-  color: var(--text-disabled);
+  color: var(--sidebar-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }

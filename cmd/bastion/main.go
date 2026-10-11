@@ -36,7 +36,11 @@ import (
 	"syscall"
 	"time"
 
+	"gorm.io/gorm"
+
 	"gowaf/bastion"
+	"gowaf/internal/store"
+	"gowaf/models"
 )
 
 func main() {
@@ -60,6 +64,10 @@ func main() {
 
 		// Banner
 		banner = flag.String("banner", "=== GoWAF Bastion Host ===\nAuthorized access only.\n", "登录横幅")
+
+		// MySQL database settings for user persistence.
+		// 设置后 /api/bastion/users 读写 users1 表;留空则用户只存在内存里。
+		mysqlDSN = flag.String("mysql-dsn", "", "MySQL DSN,例如 user:pass@tcp(127.0.0.1:3306)/myapp?charset=utf8mb4&parseTime=True&loc=Local")
 	)
 	flag.Parse()
 
@@ -79,15 +87,30 @@ func main() {
 		MaxSessions:        *maxSessions,
 		SessionIdleTimeout: *idleTimeout,
 		BannerMsg:          *banner,
+		MySQLDSN:           *mysqlDSN,
+	}
+
+	// Optional: Create MySQL database connection if DSN provided.
+	// Users are then persisted in the users1 table instead of memory.
+	var db *gorm.DB
+	if *mysqlDSN != "" {
+		log.Info("connecting to MySQL database")
+		client, err := store.NewDBClient(*mysqlDSN)
+		if err != nil {
+			fatal(log, "connect to MySQL", err)
+		}
+		db = client.DB
+		log.Info("MySQL database connected", "user_table", models.UserTableName)
 	}
 
 	// Create SSH server
-	srv, err := bastion.NewSSHServer(cfg, log)
+	srv, err := bastion.NewSSHServerWithDB(cfg, log, db)
 	if err != nil {
 		fatal(log, "create bastion server", err)
 	}
 
-	// Add default admin user
+	// Add default admin user (only when it does not exist yet, so a password
+	// change or role edit made through /api/bastion/users survives restarts).
 	admin := &bastion.User{
 		Username:      *adminUser,
 		PasswordPlain: *adminPass,
@@ -95,10 +118,13 @@ func main() {
 		Comment:       "Initial admin user",
 		CreatedAt:     time.Now(),
 	}
-	if err := srv.AddUser(admin); err != nil {
+	if srv.HasUser(*adminUser) {
+		log.Info("admin user already exists, keeping stored credentials", "username", *adminUser)
+	} else if err := srv.AddUser(admin); err != nil {
 		fatal(log, "create admin user", err)
+	} else {
+		log.Info("admin user created", "username", *adminUser)
 	}
-	log.Info("admin user created", "username", *adminUser)
 
 	// Add default banned commands
 	defaultBanned := []bastion.BannedCommand{

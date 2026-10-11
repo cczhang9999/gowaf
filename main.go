@@ -17,7 +17,11 @@ import (
 	"syscall"
 	"time"
 
+	"gorm.io/gorm"
+
 	"gowaf/bastion"
+	"gowaf/internal/store"
+	"gowaf/models"
 )
 
 var (
@@ -108,15 +112,18 @@ func main() {
 		banFor    = flag.Duration("ban-for", 10*time.Minute, "自动封禁时长")
 
 		// 堡垒机(SSH)模式:当 -ssh 启用时,同时运行 SSH 堡垒机
-		sshEnable    = flag.Bool("ssh", false, "启用 SSH 堰垒机模式(在 WAF 之外同时监听 SSH)")
-		sshListen    = flag.String("ssh-listen", ":2222", "SSH 堰垒机监听地址")
-		sshHostKey   = flag.String("ssh-host-key", "ssh_host_key", "SSH 主机密钥文件路径(不存在则自动生成)")
-		sshRecordDir = flag.String("ssh-recordings", "recordings", "SSH 会话录像存储目录")
-		sshAuditLog  = flag.String("ssh-audit-log", "audit.log", "SSH 审计日志路径")
+		sshEnable      = flag.Bool("ssh", false, "启用 SSH 堰垒机模式(在 WAF 之外同时监听 SSH)")
+		sshListen      = flag.String("ssh-listen", ":2222", "SSH 堰垒机监听地址")
+		sshHostKey     = flag.String("ssh-host-key", "ssh_host_key", "SSH 主机密钥文件路径(不存在则自动生成)")
+		sshRecordDir   = flag.String("ssh-recordings", "recordings", "SSH 会话录像存储目录")
+		sshAuditLog    = flag.String("ssh-audit-log", "audit.log", "SSH 审计日志路径")
 		sshDefaultUser = flag.String("ssh-default-user", "root", "默认后端 SSH 用户名")
 		sshDefaultPort = flag.Int("ssh-default-port", 22, "默认后端 SSH 端口")
-		sshAdminUser = flag.String("ssh-admin-user", "admin", "初始管理员用户名")
-		sshAdminPass = flag.String("ssh-admin-pass", "ChangeMe!2024", "初始管理员密码")
+		sshAdminUser   = flag.String("ssh-admin-user", "admin", "初始管理员用户名")
+		sshAdminPass   = flag.String("ssh-admin-pass", "ChangeMe!2024", "初始管理员密码")
+		// 堡垒机用户持久化:/api/bastion/users 读写 MySQL 的 users1 表。
+		// 留空则用户只存在内存里(重启丢失)。
+		mysqlDSN = flag.String("mysql-dsn", "", "MySQL DSN,例如 user:pass@tcp(127.0.0.1:3306)/myapp?charset=utf8mb4&parseTime=True&loc=Local")
 	)
 	flag.Parse()
 
@@ -206,7 +213,20 @@ func main() {
 		SessionIdleTimeout: 30 * time.Minute,
 		BannerMsg:          "=== GoWAF Bastion Host ===\nAuthorized access only.\n",
 	}
-	bastionSrv, bErr := bastion.NewSSHServer(bastionCfg, log)
+	// 堡垒机用户表:配置了 -mysql-dsn 时,用户读写落到 users1 表。
+	var userDB *gorm.DB
+	if *mysqlDSN != "" {
+		client, err := store.NewDBClient(*mysqlDSN)
+		if err != nil {
+			fatal("connect to MySQL", err)
+		}
+		userDB = client.DB
+		log.Info("bastion users persisted to MySQL", "table", models.UserTableName)
+	} else {
+		log.Info("bastion users kept in memory, pass -mysql-dsn to persist them to users1")
+	}
+
+	bastionSrv, bErr := bastion.NewSSHServerWithDB(bastionCfg, log, userDB)
 	if bErr != nil {
 		fatal("create bastion server", bErr)
 	}
@@ -218,7 +238,10 @@ func main() {
 		Comment:       "Initial admin user",
 		CreatedAt:     time.Now(),
 	}
-	if err := bastionSrv.AddUser(adminUser); err != nil {
+	// 只在首次创建:否则每次重启都会把管理员密码重置回默认值。
+	if bastionSrv.HasUser(*sshAdminUser) {
+		log.Info("admin user already exists, keeping stored credentials", "username", *sshAdminUser)
+	} else if err := bastionSrv.AddUser(adminUser); err != nil {
 		fatal("create admin user", err)
 	}
 

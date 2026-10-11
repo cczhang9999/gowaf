@@ -8,8 +8,14 @@
   --background-primary: #f5f7fa;
   --background-card: #ffffff;
   --background-header: #ffffff;
-  --background-sidebar: #2c3e50;
-  
+  --background-sidebar: #ffffff;
+
+  /* Sidebar foreground colors for light theme */
+  --sidebar-brand-text: #303133;
+  --sidebar-text: #606266;
+  --sidebar-text-active: #409eff;
+  --sidebar-text-muted: #909399;
+
   /* Text colors */
   --text-primary: #303133;
   --text-secondary: #606266;
@@ -214,13 +220,13 @@ body {
 }
 
 .el-menu-item {
-  color: var(--text-secondary) !important;
+  color: var(--sidebar-text) !important;
 }
 
 .el-menu-item:hover,
 .el-menu-item.is-active {
   background-color: rgba(64, 159, 255, 0.15) !important;
-  color: var(--text-primary) !important;
+  color: var(--sidebar-text-active) !important;
 }
 
 .el-menu--collapse .el-menu-item {
