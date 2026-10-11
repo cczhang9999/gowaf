@@ -58,3 +58,15 @@ func EnsureUserTable(db *gorm.DB) error {
 	}
 	return nil
 }
+
+// EnsureUser1Table 在 user1 不存在时建表，已存在则原样保留。
+func EnsureUser1Table(db *gorm.DB) error {
+	migrator := db.Migrator()
+	if migrator.HasTable(&models.User1{}) {
+		return nil
+	}
+	if err := migrator.CreateTable(&models.User1{}); err != nil {
+		return fmt.Errorf("create %s table: %w", models.User1TableName, err)
+	}
+	return nil
+}

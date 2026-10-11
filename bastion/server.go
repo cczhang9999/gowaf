@@ -43,13 +43,14 @@ type SSHServer struct {
 
 	sshConfig *ssh.ServerConfig
 
-	authStore    *AuthStore
-	dbAuthStore  *DatabaseAuthStore // Option for MySQL-based user persistence
-	assetStore   *AssetStore
-	auditLogger  *AuditLogger
-	auditStore   *AuditStore
-	recorder     *SessionRecorder
-	recordingIdx *RecordingIndex
+	authStore     *AuthStore
+	dbAuthStore   *DatabaseAuthStore   // Option for MySQL-based user persistence (users1 table)
+	dbAuthStore1  *DatabaseAuthStore1  // Option for MySQL-based user persistence (user1 table)
+	assetStore    *AssetStore
+	auditLogger   *AuditLogger
+	auditStore    *AuditStore
+	recorder      *SessionRecorder
+	recordingIdx  *RecordingIndex
 
 	listener net.Listener
 
@@ -133,7 +134,14 @@ func NewSSHServerWithDB(cfg *BastionConfig, log *slog.Logger, db *gorm.DB) (*SSH
 			return nil, fmt.Errorf("create database auth store: %w", err)
 		}
 		srv.dbAuthStore = dbAuthStore
-		log.Info("database-backed user persistence enabled")
+		log.Info("database-backed user persistence enabled (users1 table)")
+
+		dbAuthStore1, err := NewDatabaseAuthStore1(db)
+		if err != nil {
+			return nil, fmt.Errorf("create database auth store1: %w", err)
+		}
+		srv.dbAuthStore1 = dbAuthStore1
+		log.Info("database-backed user persistence enabled (user1 table)")
 	}
 
 	return srv, nil
@@ -268,6 +276,73 @@ func (s *SSHServer) HasUser(username string) bool {
 func (s *SSHServer) CanAccessAsset(u *User, assetID string) bool {
 	if s.dbAuthStore != nil {
 		return s.dbAuthStore.CanAccessAsset(u, assetID)
+	}
+	return s.authStore.CanAccessAsset(u, assetID)
+}
+
+// --- User1 operations (for user1 table) ---
+
+// Register1 adds or updates a user in the user1 table.
+func (s *SSHServer) Register1(u *User) error {
+	if s.dbAuthStore1 != nil {
+		return s.dbAuthStore1.Register1(u)
+	}
+	return s.authStore.Register(u)
+}
+
+// UpdateUser1 updates an existing user in the user1 table.
+func (s *SSHServer) UpdateUser1(u *User) error {
+	if s.dbAuthStore1 != nil {
+		return s.dbAuthStore1.UpdateUser1(u)
+	}
+	return s.authStore.UpdateUser(u)
+}
+
+// Unregister1 removes a user from the user1 table.
+func (s *SSHServer) Unregister1(username string) error {
+	if s.dbAuthStore1 != nil {
+		return s.dbAuthStore1.Unregister1(username)
+	}
+	s.authStore.Unregister(username)
+	return nil
+}
+
+// GetUser1 returns a user by username from the user1 table.
+func (s *SSHServer) GetUser1(username string) (*User, bool) {
+	if s.dbAuthStore1 != nil {
+		return s.dbAuthStore1.GetUser1(username)
+	}
+	return s.authStore.GetUser(username)
+}
+
+// GetUser1ByID returns a user by primary key from the user1 table.
+func (s *SSHServer) GetUser1ByID(id uint) (*User, bool) {
+	if s.dbAuthStore1 != nil {
+		return s.dbAuthStore1.GetUser1ByID(id)
+	}
+	return s.authStore.GetUserByID(id)
+}
+
+// ListUsers1 returns all users from the user1 table.
+func (s *SSHServer) ListUsers1() []*User {
+	if s.dbAuthStore1 != nil {
+		return s.dbAuthStore1.ListUsers1()
+	}
+	return s.authStore.ListUsers()
+}
+
+// HasUser1 checks if a user exists in the user1 table.
+func (s *SSHServer) HasUser1(username string) bool {
+	if s.dbAuthStore1 != nil {
+		return s.dbAuthStore1.HasUser1(username)
+	}
+	return s.authStore.HasUser(username)
+}
+
+// CanAccessAsset1 checks if a user can access a specific asset in the user1 table.
+func (s *SSHServer) CanAccessAsset1(u *User, assetID string) bool {
+	if s.dbAuthStore1 != nil {
+		return s.dbAuthStore1.CanAccessAsset1(u, assetID)
 	}
 	return s.authStore.CanAccessAsset(u, assetID)
 }

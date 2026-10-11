@@ -31,9 +31,13 @@ func NewAdminAPI(srv *SSHServer, log *slog.Logger) *AdminAPI {
 func (a *AdminAPI) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// User management
+	// User management (users1 table)
 	mux.HandleFunc("/users", a.handleUsers())
 	mux.HandleFunc("/users/", a.handleUserByID())
+
+	// User1 management (user1 table)
+	mux.HandleFunc("/users1", a.handleUsers1())
+	mux.HandleFunc("/users1/", a.handleUsers1ByID())
 
 	// Asset management
 	mux.HandleFunc("/assets", a.handleAssets())
@@ -93,6 +97,16 @@ type usersResponse struct {
 
 // UserCreateRequest is the request body for creating a user.
 type UserCreateRequest struct {
+	Username  string   `json:"username"`
+	Password  string   `json:"password"`
+	PublicKey string   `json:"public_key,omitempty"`
+	Role      string   `json:"role"`
+	Assets    []string `json:"assets,omitempty"`
+	Comment   string   `json:"comment,omitempty"`
+}
+
+// User1CreateRequest is the request body for creating a user in user1 table.
+type User1CreateRequest struct {
 	Username  string   `json:"username"`
 	Password  string   `json:"password"`
 	PublicKey string   `json:"public_key,omitempty"`
@@ -791,4 +805,223 @@ func (a *AdminAPI) json(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// writeJSONErr 输出统一的 JSON 错误,方便前端展示具体原因。
+func writeJSONErr(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": msg})
+}
+
+// --- User1 management (for user1 table) ---
+
+// hasUser1Store returns true if the server supports the user1 table via DatabaseAuthStore1.
+func (a *AdminAPI) hasUser1Store() bool {
+	return a.Server.dbAuthStore1 != nil
+}
+
+func (a *AdminAPI) handleUsers1() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			a.listUsers1(w, r)
+		case http.MethodPost:
+			a.createUser1(w, r)
+		case http.MethodOptions:
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+func (a *AdminAPI) listUsers1(w http.ResponseWriter, r *http.Request) {
+	if !a.hasUser1Store() {
+		writeJSONErr(w, http.StatusServiceUnavailable, "user1 store not available")
+		return
+	}
+	users := a.Server.ListUsers1()
+	a.json(w, http.StatusOK, users1Response{Users: users, Count: len(users)})
+}
+
+type users1Response struct {
+	Users []*User `json:"users"`
+	Count int     `json:"count"`
+}
+
+func (a *AdminAPI) createUser1(w http.ResponseWriter, r *http.Request) {
+	if !a.hasUser1Store() {
+		writeJSONErr(w, http.StatusServiceUnavailable, "user1 store not available")
+		return
+	}
+
+	var req User1CreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Username == "" {
+		http.Error(w, "username required", http.StatusBadRequest)
+		return
+	}
+	if req.Password == "" && req.PublicKey == "" {
+		http.Error(w, "password or public_key required", http.StatusBadRequest)
+		return
+	}
+	if req.Password != "" && len(req.Password) < 8 {
+		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+	if req.PublicKey != "" {
+		if _, err := parseSSHPublicKey(req.PublicKey); err != nil {
+			http.Error(w, "invalid public_key: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	role := UserRole(req.Role)
+	if role == "" {
+		role = RoleUser
+	} else if !validRole(role) {
+		http.Error(w, "invalid role; must be admin, user or auditor", http.StatusBadRequest)
+		return
+	}
+	if a.Server.HasUser1(req.Username) {
+		http.Error(w, "user already exists", http.StatusConflict)
+		return
+	}
+
+	u := &User{
+		Username:      req.Username,
+		PasswordPlain: req.Password,
+		PublicKey:     req.PublicKey,
+		Role:          role,
+		Assets:        req.Assets,
+		Comment:       req.Comment,
+		CreatedAt:     time.Now(),
+	}
+	if err := a.Server.Register1(u); err != nil {
+		http.Error(w, "create user: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.json(w, http.StatusCreated, map[string]any{"success": true, "id": u.ID, "username": req.Username})
+}
+
+func (a *AdminAPI) handleUsers1ByID() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/users1/")
+		if id == "" {
+			http.Error(w, "user id required", http.StatusBadRequest)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			a.getUser1(w, r, id)
+		case http.MethodPut:
+			a.updateUser1(w, r, id)
+		case http.MethodDelete:
+			a.deleteUser1(w, r, id)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+func (a *AdminAPI) getUser1(w http.ResponseWriter, r *http.Request, id string) {
+	if !a.hasUser1Store() {
+		writeJSONErr(w, http.StatusServiceUnavailable, "user1 store not available")
+		return
+	}
+	u, ok := a.Server.GetUser1(id)
+	if !ok {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	a.json(w, http.StatusOK, u)
+}
+
+func (a *AdminAPI) updateUser1(w http.ResponseWriter, r *http.Request, id string) {
+	if !a.hasUser1Store() {
+		writeJSONErr(w, http.StatusServiceUnavailable, "user1 store not available")
+		return
+	}
+
+	actual, ok := a.Server.GetUser1(id)
+	if !ok {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+
+	var req UserUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Password != nil {
+		if *req.Password == "" {
+			http.Error(w, "password cannot be empty when changing it", http.StatusBadRequest)
+			return
+		}
+		if len(*req.Password) < 8 {
+			http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+			return
+		}
+		hash, err := hashPassword(*req.Password)
+		if err != nil {
+			http.Error(w, "hash password: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		actual.PasswordHash = hash
+	}
+	if req.PublicKey != nil {
+		if *req.PublicKey == "" {
+			actual.PublicKey = ""
+		} else if _, err := parseSSHPublicKey(*req.PublicKey); err != nil {
+			http.Error(w, "invalid public_key: "+err.Error(), http.StatusBadRequest)
+			return
+		} else {
+			actual.PublicKey = *req.PublicKey
+		}
+	}
+	if req.Role != nil {
+		if !validRole(UserRole(*req.Role)) {
+			http.Error(w, "invalid role; must be admin, user or auditor", http.StatusBadRequest)
+			return
+		}
+		actual.Role = UserRole(*req.Role)
+	}
+	if req.Assets != nil {
+		actual.Assets = req.Assets
+	}
+	if req.Comment != nil {
+		actual.Comment = *req.Comment
+	}
+
+	if err := a.Server.UpdateUser1(actual); err != nil {
+		http.Error(w, "update user: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.json(w, http.StatusOK, map[string]any{"success": true})
+}
+
+func (a *AdminAPI) deleteUser1(w http.ResponseWriter, r *http.Request, id string) {
+	if !a.hasUser1Store() {
+		writeJSONErr(w, http.StatusServiceUnavailable, "user1 store not available")
+		return
+	}
+
+	actual, ok := a.Server.GetUser1(id)
+	if !ok {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	if err := a.Server.Unregister1(actual.Username); err != nil {
+		http.Error(w, "delete user: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.json(w, http.StatusOK, map[string]any{"success": true, "username": actual.Username})
 }

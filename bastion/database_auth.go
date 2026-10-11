@@ -223,3 +223,182 @@ func (s *DatabaseAuthStore) HasUser(username string) bool {
 func (s *DatabaseAuthStore) CanAccessAsset(u *User, assetID string) bool {
 	return canAccessAsset(u, assetID)
 }
+
+// DatabaseAuthStore1 把堡垒机用户持久化到 MySQL 的 user1 表。
+// 这是 DatabaseAuthStore 的变体，使用 user1 表而非 users1 表。
+type DatabaseAuthStore1 struct {
+	repo store.User1Repository
+}
+
+// NewDatabaseAuthStore1 创建基于数据库的认证存储，使用 user1 表。
+func NewDatabaseAuthStore1(db *gorm.DB) (*DatabaseAuthStore1, error) {
+	if err := store.EnsureUser1Table(db); err != nil {
+		return nil, err
+	}
+	return &DatabaseAuthStore1{repo: store.NewUser1Repository(db)}, nil
+}
+
+// user1ToModel 把 bastion.User 转换为 models.User1。
+func user1ToModel(u *User) *models.User1 {
+	return &models.User1{
+		ID:        u.ID,
+		Username:  u.Username,
+		Password:  string(u.PasswordHash),
+		Role:      string(u.Role),
+		PublicKey: u.PublicKey,
+		Assets:    StringSliceToJSON(u.Assets),
+		Comment:   u.Comment,
+		CreatedAt: u.CreatedAt,
+	}
+}
+
+// user1FromModel 把 models.User1 转成 bastion.User。
+func user1FromModel(m *models.User1) *User {
+	return &User{
+		ID:        m.ID,
+		Username:  m.Username,
+		Role:      UserRole(m.Role),
+		PublicKey: m.PublicKey,
+		Assets:    JSONToStringSlice(m.Assets),
+		Comment:   m.Comment,
+		CreatedAt: m.CreatedAt,
+	}
+}
+
+// Register1 添加用户到 user1 表，写入前完成 bcrypt 哈希。
+func (s *DatabaseAuthStore1) Register1(u *User) error {
+	if u == nil || u.Username == "" {
+		return errors.New("register user: username required")
+	}
+	if u.PasswordPlain != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(u.PasswordPlain), bcrypt.DefaultCost)
+		if err != nil {
+			return fmt.Errorf("hash password: %w", err)
+		}
+		u.PasswordHash = hash
+		u.PasswordPlain = ""
+	}
+
+	m := user1ToModel(u)
+	if err := s.repo.UpsertUser1(context.Background(), m); err != nil {
+		return fmt.Errorf("save user to %s: %w", models.User1TableName, err)
+	}
+	u.ID = m.ID
+	u.CreatedAt = m.CreatedAt
+	return nil
+}
+
+// UpdateUser1 更新 user1 表中的用户记录。
+func (s *DatabaseAuthStore1) UpdateUser1(u *User) error {
+	if u == nil || u.Username == "" {
+		return errors.New("update user: username required")
+	}
+
+	ctx := context.Background()
+	m := user1ToModel(u)
+	if m.ID == 0 {
+		existing, err := s.repo.GetUser1ByUsername(ctx, u.Username)
+		if err != nil {
+			return fmt.Errorf("update user %q: %w", u.Username, err)
+		}
+		m.ID = existing.ID
+	}
+	if err := s.repo.UpdateUser1(ctx, m); err != nil {
+		return fmt.Errorf("update user %q in %s: %w", u.Username, models.User1TableName, err)
+	}
+	u.ID = m.ID
+	return nil
+}
+
+// Unregister1 从 user1 表中删除用户。
+func (s *DatabaseAuthStore1) Unregister1(username string) error {
+	if err := s.repo.DeleteUser1(context.Background(), username); err != nil {
+		return fmt.Errorf("delete user %q from %s: %w", username, models.User1TableName, err)
+	}
+	return nil
+}
+
+// Authenticate1 通过用户名和密码验证。
+func (s *DatabaseAuthStore1) Authenticate1(username, password string) (*User, error) {
+	m, err := s.repo.GetUser1ByUsername(context.Background(), username)
+	if err != nil {
+		if errors.Is(err, store.ErrUserNotFound) {
+			return nil, fmt.Errorf("user %q not found", username)
+		}
+		return nil, fmt.Errorf("query user from %s: %w", models.User1TableName, err)
+	}
+	if m.Password == "" {
+		return nil, fmt.Errorf("user %q has no password set", username)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(m.Password), []byte(password)); err != nil {
+		return nil, fmt.Errorf("invalid password for user %q", username)
+	}
+	return user1FromModel(m), nil
+}
+
+// AuthenticatePublicKey1 通过 SSH 公钥验证。
+func (s *DatabaseAuthStore1) AuthenticatePublicKey1(username string, pubKey ssh.PublicKey) (*User, error) {
+	m, err := s.repo.GetUser1ByUsername(context.Background(), username)
+	if err != nil {
+		if errors.Is(err, store.ErrUserNotFound) {
+			return nil, fmt.Errorf("user %q not found", username)
+		}
+		return nil, fmt.Errorf("query user from %s: %w", models.User1TableName, err)
+	}
+	if m.PublicKey == "" {
+		return nil, fmt.Errorf("user %q has no public key configured", username)
+	}
+
+	configuredKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(m.PublicKey))
+	if err != nil {
+		return nil, fmt.Errorf("invalid configured public key: %w", err)
+	}
+	if subtle.ConstantTimeCompare(pubKey.Marshal(), configuredKey.Marshal()) != 1 {
+		return nil, fmt.Errorf("public key mismatch for user %q", username)
+	}
+	return user1FromModel(m), nil
+}
+
+// GetUser1 按用户名获取用户。
+func (s *DatabaseAuthStore1) GetUser1(username string) (*User, bool) {
+	m, err := s.repo.GetUser1ByUsername(context.Background(), username)
+	if err != nil {
+		return nil, false
+	}
+	return user1FromModel(m), true
+}
+
+// GetUser1ByID 按主键获取用户。
+func (s *DatabaseAuthStore1) GetUser1ByID(id uint) (*User, bool) {
+	m, err := s.repo.GetUser1ByID(context.Background(), id)
+	if err != nil {
+		return nil, false
+	}
+	return user1FromModel(m), true
+}
+
+// ListUsers1 返回 user1 表中的全部用户。
+func (s *DatabaseAuthStore1) ListUsers1() []*User {
+	ms, err := s.repo.ListUsers1(context.Background())
+	if err != nil {
+		return []*User{}
+	}
+	users := make([]*User, 0, len(ms))
+	for _, m := range ms {
+		users = append(users, user1FromModel(m))
+	}
+	return users
+}
+
+// HasUser1 检查用户是否存在。
+func (s *DatabaseAuthStore1) HasUser1(username string) bool {
+	if _, err := s.repo.GetUser1ByUsername(context.Background(), username); err != nil {
+		return false
+	}
+	return true
+}
+
+// CanAccessAsset1 检查用户是否可以访问指定资产。
+func (s *DatabaseAuthStore1) CanAccessAsset1(u *User, assetID string) bool {
+	return canAccessAsset(u, assetID)
+}

@@ -213,7 +213,7 @@ func main() {
 		SessionIdleTimeout: 30 * time.Minute,
 		BannerMsg:          "=== GoWAF Bastion Host ===\nAuthorized access only.\n",
 	}
-	// 堡垒机用户表:配置了 -mysql-dsn 时,用户读写落到 users1 表。
+	// 堡垒机用户表:配置了 -mysql-dsn 时,用户读写落到 users1 表和 user1 表。
 	var userDB *gorm.DB
 	if *mysqlDSN != "" {
 		client, err := store.NewDBClient(*mysqlDSN)
@@ -221,9 +221,9 @@ func main() {
 			fatal("connect to MySQL", err)
 		}
 		userDB = client.DB
-		log.Info("bastion users persisted to MySQL", "table", models.UserTableName)
+		log.Info("bastion users persisted to MySQL", "table", models.UserTableName, "table1", models.User1TableName)
 	} else {
-		log.Info("bastion users kept in memory, pass -mysql-dsn to persist them to users1")
+		log.Info("bastion users kept in memory, pass -mysql-dsn to persist them to users1/user1 tables")
 	}
 
 	bastionSrv, bErr := bastion.NewSSHServerWithDB(bastionCfg, log, userDB)
