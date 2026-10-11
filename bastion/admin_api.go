@@ -115,6 +115,23 @@ func (a *AdminAPI) createUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "password or public_key required", http.StatusBadRequest)
 		return
 	}
+	if req.Password != "" && len(req.Password) < 8 {
+		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+	if req.PublicKey != "" {
+		if _, err := parseSSHPublicKey(req.PublicKey); err != nil {
+			http.Error(w, "invalid public_key: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	role := UserRole(req.Role)
+	if role == "" {
+		role = RoleUser
+	} else if !validRole(role) {
+		http.Error(w, "invalid role; must be admin, user or auditor", http.StatusBadRequest)
+		return
+	}
 	if a.Server.AuthStore().HasUser(req.Username) {
 		http.Error(w, "user already exists", http.StatusConflict)
 		return
@@ -124,7 +141,7 @@ func (a *AdminAPI) createUser(w http.ResponseWriter, r *http.Request) {
 		Username:      req.Username,
 		PasswordPlain: req.Password,
 		PublicKey:     req.PublicKey,
-		Role:          UserRole(req.Role),
+		Role:          role,
 		Assets:        req.Assets,
 		Comment:       req.Comment,
 		CreatedAt:     time.Now(),
@@ -171,11 +188,19 @@ func hashPassword(password string) ([]byte, error) {
 }
 
 type UserUpdateRequest struct {
-	Password  string   `json:"password,omitempty"`
-	PublicKey string   `json:"public_key,omitempty"`
-	Role      string   `json:"role,omitempty"`
+	Password  *string  `json:"password,omitempty"`
+	PublicKey *string  `json:"public_key,omitempty"`
+	Role      *string  `json:"role,omitempty"`
 	Assets    []string `json:"assets,omitempty"`
-	Comment   string   `json:"comment,omitempty"`
+	Comment   *string  `json:"comment,omitempty"`
+}
+
+func validRole(r UserRole) bool {
+	switch r {
+	case RoleAdmin, RoleUser, RoleAuditor:
+		return true
+	}
+	return false
 }
 
 func (a *AdminAPI) updateUser(w http.ResponseWriter, r *http.Request, id string) {
@@ -184,37 +209,58 @@ func (a *AdminAPI) updateUser(w http.ResponseWriter, r *http.Request, id string)
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Get the actual user from the store to modify
-	a.Server.AuthStore().mu.RLock()
+
+	// Lock once across the existence check and the mutation so the user
+	// cannot be deleted between reading and updating.
+	a.Server.AuthStore().mu.Lock()
+	defer a.Server.AuthStore().mu.Unlock()
+
 	actual, exists := a.Server.AuthStore().users[id]
-	a.Server.AuthStore().mu.RUnlock()
 	if !exists {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
 
-	a.Server.AuthStore().mu.Lock()
-	defer a.Server.AuthStore().mu.Unlock()
-
-	if req.Password != "" {
-		hash, err := hashPassword(req.Password)
+	if req.Password != nil {
+		if *req.Password == "" {
+			http.Error(w, "password cannot be empty when changing it", http.StatusBadRequest)
+			return
+		}
+		if len(*req.Password) < 8 {
+			http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+			return
+		}
+		hash, err := hashPassword(*req.Password)
 		if err != nil {
 			http.Error(w, "hash password: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		actual.PasswordHash = hash
 	}
-	if req.PublicKey != "" {
-		actual.PublicKey = req.PublicKey
+	if req.PublicKey != nil {
+		if *req.PublicKey == "" {
+			// Explicitly clear the key.
+			actual.PublicKey = ""
+		} else if _, err := parseSSHPublicKey(*req.PublicKey); err != nil {
+			http.Error(w, "invalid public_key: "+err.Error(), http.StatusBadRequest)
+			return
+		} else {
+			actual.PublicKey = *req.PublicKey
+		}
 	}
-	if req.Role != "" {
-		actual.Role = UserRole(req.Role)
+	if req.Role != nil {
+		if !validRole(UserRole(*req.Role)) {
+			http.Error(w, "invalid role; must be admin, user or auditor", http.StatusBadRequest)
+			return
+		}
+		actual.Role = UserRole(*req.Role)
 	}
 	if req.Assets != nil {
 		actual.Assets = req.Assets
 	}
-	if req.Comment != "" {
-		actual.Comment = req.Comment
+	if req.Comment != nil {
+		// Comment is a pointer so an empty string clears the field.
+		actual.Comment = *req.Comment
 	}
 	a.json(w, http.StatusOK, map[string]any{"success": true})
 }
@@ -500,12 +546,12 @@ func (a *AdminAPI) getSession(w http.ResponseWriter, r *http.Request, id string)
 	for _, sc := range a.Server.ActiveSessions() {
 		if sc.ID == id {
 			info := map[string]any{
-				"id":        sc.ID,
-				"username":  sc.User.Username,
-				"asset_id":  "",
+				"id":         sc.ID,
+				"username":   sc.User.Username,
+				"asset_id":   "",
 				"asset_name": "",
-				"start_time":  sc.StartTime,
-				"status":    "active",
+				"start_time": sc.StartTime,
+				"status":     "active",
 			}
 			if sc.Asset != nil {
 				info["asset_id"] = sc.Asset.ID
@@ -522,13 +568,13 @@ func (a *AdminAPI) getSession(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 	a.json(w, http.StatusOK, map[string]any{
-		"id":        rec.ID,
-		"username":  rec.Username,
-		"asset_id":  rec.AssetID,
+		"id":         rec.ID,
+		"username":   rec.Username,
+		"asset_id":   rec.AssetID,
 		"asset_name": rec.AssetName,
-		"start_time":  rec.StartTime,
-		"end_time":    rec.EndTime,
-		"status":      "closed",
+		"start_time": rec.StartTime,
+		"end_time":   rec.EndTime,
+		"status":     "closed",
 	})
 }
 

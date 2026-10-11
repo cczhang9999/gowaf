@@ -42,7 +42,7 @@
     </el-card>
 
     <!-- Add/Edit Asset Dialog -->
-    <el-dialog :title="dialogTitle" :visible="showDialog" @close="showDialog = false">
+    <el-dialog v-model="showDialog" :title="dialogTitle" @closed="showDialog = false">
       <el-form :model="form" label-width="100px">
         <el-form-item label="名称" required>
           <el-input v-model="form.name" placeholder="资产名称,如:生产-web-01" />

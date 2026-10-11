@@ -45,7 +45,7 @@
     </el-card>
 
     <!-- Add Command Dialog -->
-    <el-dialog :title="dialogTitle" :visible="showDialog" @close="showDialog = false">
+    <el-dialog v-model="showDialog" :title="dialogTitle" @closed="showDialog = false">
       <el-form :model="form" label-width="100px">
         <el-form-item label="ID" required>
           <el-input v-model="form.id" placeholder="规则 ID,如: ban-009" />

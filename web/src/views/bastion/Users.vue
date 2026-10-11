@@ -52,7 +52,7 @@
     </el-card>
 
     <!-- Add/Edit User Dialog -->
-    <el-dialog :title="dialogTitle" :visible="showDialog" @close="resetForm">
+    <el-dialog v-model="showDialog" :title="dialogTitle" @closed="resetForm">
       <el-form :model="form" label-width="100px">
         <el-form-item label="用户名" required :required="!isEdit">
           <el-input v-model="form.username" placeholder="用户名(登录名)" :disabled="isEdit" />
@@ -203,16 +203,29 @@ const saveUser = async () => {
     ElMessage.error('请输入密码')
     return
   }
+  if (form.value.password && form.value.password.length < 8) {
+    ElMessage.error('密码至少 8 个字符')
+    return
+  }
 
   try {
     if (isEdit.value && editingUser.value) {
-      await bastionStore.updateUser(editingUser.value.username, {
-        password: form.value.password,
+      const update: BastionUserUpdate = {
         role: form.value.role,
-        public_key: form.value.public_key || undefined,
         assets: form.value.assets,
-        comment: form.value.comment,
-      } as BastionUserUpdate)
+      }
+      // Only send a password when the user actually typed a new one.
+      if (form.value.password) update.password = form.value.password
+      // Send pointers as defined only when the value differs from the stored
+      // value; the backend clears the field when the pointer is a nonzero
+      // empty string, so explicit blanking is allowed here.
+      if (form.value.public_key !== (editingUser.value.public_key || '')) {
+        update.public_key = form.value.public_key
+      }
+      if (form.value.comment !== (editingUser.value.comment || '')) {
+        update.comment = form.value.comment
+      }
+      await bastionStore.updateUser(editingUser.value.username, update)
       ElMessage.success('已更新')
     } else {
       await bastionStore.createUser({
