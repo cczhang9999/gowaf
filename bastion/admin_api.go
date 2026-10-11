@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"gowaf/internal/middleware"
 )
 
 // AdminAPI provides a REST API for managing the bastion host.
@@ -62,7 +64,7 @@ func (a *AdminAPI) Handler() http.Handler {
 	// Metrics
 	mux.HandleFunc("/metrics", a.handleMetrics)
 
-	return mux
+	return middleware.Logging(a.Log)(mux)
 }
 
 // --- User management ---
@@ -86,7 +88,7 @@ func (a *AdminAPI) handleUsers() http.HandlerFunc {
 }
 
 func (a *AdminAPI) listUsers(w http.ResponseWriter, r *http.Request) {
-	users := a.Server.ListUsers()
+	users := a.Server.ListUsers1()
 	a.json(w, http.StatusOK, usersResponse{Users: users, Count: len(users)})
 }
 
@@ -146,7 +148,7 @@ func (a *AdminAPI) createUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid role; must be admin, user or auditor", http.StatusBadRequest)
 		return
 	}
-	if a.Server.HasUser(req.Username) {
+	if a.Server.HasUser1(req.Username) {
 		http.Error(w, "user already exists", http.StatusConflict)
 		return
 	}
@@ -160,7 +162,7 @@ func (a *AdminAPI) createUser(w http.ResponseWriter, r *http.Request) {
 		Comment:       req.Comment,
 		CreatedAt:     time.Now(),
 	}
-	if err := a.Server.AddUser(u); err != nil {
+	if err := a.Server.Register1(u); err != nil {
 		http.Error(w, "create user: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -196,14 +198,16 @@ func (a *AdminAPI) getUser(w http.ResponseWriter, r *http.Request, id string) {
 	a.json(w, http.StatusOK, u)
 }
 
-// resolveUser looks a user up by username first, then by the numeric users1
+// resolveUser looks a user up by username first, then by the numeric user1
 // primary key, so /api/bastion/users/{id} accepts both forms.
+// It reads from the user1 table to stay consistent with createUser (which
+// persists additions via Register1 → user1 table).
 func (a *AdminAPI) resolveUser(idOrName string) (*User, bool) {
-	if u, ok := a.Server.GetUser(idOrName); ok {
+	if u, ok := a.Server.GetUser1(idOrName); ok {
 		return u, true
 	}
 	if n, err := strconv.ParseUint(idOrName, 10, 64); err == nil {
-		return a.Server.GetUserByID(uint(n))
+		return a.Server.GetUser1ByID(uint(n))
 	}
 	return nil, false
 }
@@ -287,7 +291,7 @@ func (a *AdminAPI) updateUser(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	// Save updated user
-	if err := a.Server.UpdateUser(actual); err != nil {
+	if err := a.Server.UpdateUser1(actual); err != nil {
 		http.Error(w, "update user: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -300,7 +304,7 @@ func (a *AdminAPI) deleteUser(w http.ResponseWriter, r *http.Request, id string)
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
-	if err := a.Server.RemoveUser(actual.Username); err != nil {
+	if err := a.Server.Unregister1(actual.Username); err != nil {
 		http.Error(w, "delete user: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

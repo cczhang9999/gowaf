@@ -1,6 +1,13 @@
 // Minimal mock of the gowaf Go API server, so we can exercise the frontend
 // in a browser without needing to build/run the Go binary.
 import { createServer } from 'http'
+import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { fileURLToPath } from 'url'
+import path from 'path'
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const dbPath = path.resolve(__dirname, 'user1.json')
+
 
 const rules = [
   { id: 'scan-001', category: 'scanner', where: 'path', pattern: '/\\.\\.(/|\\\\)', keywords: [] },
@@ -29,6 +36,20 @@ const metrics = {
   mode: 'block',
   allow_count: config.allow.length,
   deny_count: config.deny.length,
+}
+
+const loadDbUsers = () => {
+  try {
+    if (!existsSync(dbPath)) return []
+    const data = readFileSync(dbPath, 'utf8')
+    return data ? JSON.parse(data) : []
+  } catch {
+    return []
+  }
+}
+
+const saveDbUsers = (list) => {
+  try { writeFileSync(dbPath, JSON.stringify(list), 'utf8') } catch {}
 }
 
 // --- Bastion mock data ---
@@ -240,8 +261,45 @@ createServer((req, res) => {
     const path = url.pathname.slice('/api/bastion/'.length)
 
     if (path === 'users') {
-      if (req.method === 'GET') return send(res, { users: bastionUsers, count: bastionUsers.length })
-      if (req.method === 'POST') return send(res, { success: true })
+      if (req.method === 'GET') {
+        // Return from file-based DB if available, otherwise seed with initial data
+        const list = loadDbUsers()
+        const data = list.length ? list : bastionUsers
+        return send(res, { users: data, count: data.length })
+      }
+      if (req.method === 'POST') {
+        // Create new user and persist to DB
+        let body = ''
+        req.on('data', c => body += c)
+        req.on('end', () => {
+          try {
+            const newUser = JSON.parse(body)
+            if (!newUser?.username) {
+              return writeJSONErr(res, 400, 'invalid json')
+            }
+            const list = loadDbUsers()
+            if (list.find(u => u.username === newUser.username)) {
+              return writeJSONErr(res, 409, 'user exists')
+            }
+            const now = new Date().toISOString()
+            const storeUser = {
+              username: newUser.username,
+              password: newUser.password,
+              public_key: newUser.public_key,
+              role: newUser.role ?? 'user',
+              assets: newUser.assets ?? [],
+              comment: newUser.comment ?? '',
+              created_at: now
+            }
+            list.push(storeUser)
+            saveDbUsers(list)
+            return send(res, { success: true, username: storeUser.username })
+          } catch {
+            return writeJSONErr(res, 400, 'invalid json')
+          }
+        })
+        return
+      }
       return send(res, { success: true, count: 1 })
     }
 

@@ -39,6 +39,7 @@ import (
 	"gorm.io/gorm"
 
 	"gowaf/bastion"
+	"gowaf/internal/middleware"
 	"gowaf/internal/store"
 	"gowaf/models"
 )
@@ -95,7 +96,7 @@ func main() {
 	var db *gorm.DB
 	if *mysqlDSN != "" {
 		log.Info("connecting to MySQL database")
-		client, err := store.NewDBClient(*mysqlDSN)
+		client, err := store.NewDBClient(*mysqlDSN, log)
 		if err != nil {
 			fatal(log, "connect to MySQL", err)
 		}
@@ -168,7 +169,7 @@ func main() {
 
 		apiServer := &http.Server{
 			Addr:              *apiListen,
-			Handler:           apiMux,
+			Handler:           middleware.Logging(log)(apiMux),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       15 * time.Second,
 			WriteTimeout:      60 * time.Second,

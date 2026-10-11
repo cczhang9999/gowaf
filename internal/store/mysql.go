@@ -1,10 +1,12 @@
 package store
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"log"
-	"os"
 	"time"
+
+	"log/slog"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -13,26 +15,113 @@ import (
 	"gowaf/models"
 )
 
-// gormLogger 压低日志噪音：远端 MySQL 单次查询常常超过 GORM 默认的 200ms
-// 慢查询阈值，而「记录不存在」在仓储层是预期内的正常分支（由上层翻译成 404）。
-func gormLogger() logger.Interface {
-	return logger.New(log.New(os.Stderr, "", log.LstdFlags), logger.Config{
-		SlowThreshold:             2 * time.Second,
-		LogLevel:                  logger.Warn,
-		IgnoreRecordNotFoundError: true,
-	})
+// slogGormLogger implements gorm.io/gorm/logger.Interface by delegating to
+// slog, so SQL logs are emitted as structured JSON through the same pipeline
+// as the rest of the application.
+//
+// Unlike the default GORM logger (which writes raw lines to os.Stderr via the
+// standard library log package), this adapter preserves structured attributes
+// such as the SQL statement, row count, duration, and any error.
+type slogGormLogger struct {
+	level          logger.LogLevel
+	log            *slog.Logger
+	ignoreNotFound bool
+	slowThreshold  time.Duration
+}
+
+// NewSlogGormLogger creates a GORM logger that writes structured logs to the
+// given slog.Logger. All SQL statements are logged at Info level; slow queries
+// (> slowThreshold) at Warn; errors at Error level.
+func NewSlogGormLogger(log *slog.Logger) logger.Interface {
+	return &slogGormLogger{
+		level:          logger.Info,
+		log:            log,
+		ignoreNotFound: true,
+		slowThreshold:  2 * time.Second,
+	}
+}
+
+// LogMode implements logger.Interface.
+func (l *slogGormLogger) LogMode(level logger.LogLevel) logger.Interface {
+	newLogger := *l
+	newLogger.level = level
+	return &newLogger
+}
+
+// Info implements logger.Interface.
+func (l *slogGormLogger) Info(ctx context.Context, msg string, data ...interface{}) {
+	if l.level >= logger.Info {
+		l.log.Info(msg, data...)
+	}
+}
+
+// Warn implements logger.Interface.
+func (l *slogGormLogger) Warn(ctx context.Context, msg string, data ...interface{}) {
+	if l.level >= logger.Warn {
+		l.log.Warn(msg, data...)
+	}
+}
+
+// Error implements logger.Interface.
+func (l *slogGormLogger) Error(ctx context.Context, msg string, data ...interface{}) {
+	if l.level >= logger.Error {
+		l.log.Error(msg, data...)
+	}
+}
+
+// Trace implements logger.Interface. It is called for every SQL statement
+// executed by GORM and logs the query text, execution time, row count, and
+// any error at the appropriate level.
+func (l *slogGormLogger) Trace(ctx context.Context, begin time.Time, fc func() (sql string, rowsAffected int64), err error) {
+	if l.level <= logger.Silent {
+		return
+	}
+
+	elapsed := time.Since(begin)
+	sql, rows := fc()
+
+	attrs := []any{
+		"sql", sql,
+		"duration_ms", float64(elapsed.Nanoseconds()) / 1e6,
+	}
+	if rows != -1 {
+		attrs = append(attrs, "rows", rows)
+	}
+
+	switch {
+	case err != nil:
+		if !l.ignoreNotFound || !errors.Is(err, gorm.ErrRecordNotFound) {
+			attrs = append(attrs, "err", err)
+			l.log.Error("gorm query error", attrs...)
+		} else {
+			l.log.Debug("gorm query (record not found)", attrs...)
+		}
+	case elapsed > l.slowThreshold && l.slowThreshold != 0 && l.level >= logger.Warn:
+		l.log.Warn("gorm slow query", attrs...)
+	default:
+		l.log.Info("gorm query", attrs...)
+	}
 }
 
 type DBClient struct {
 	DB *gorm.DB
 }
 
-// NewDBClient 创建并初始化数据库连接。
+// NewDBClient creates and initializes the database connection.
 //
-// 用户表（users1）已存在时不会被改动，只在缺失时创建；
-// 迁移策略见 EnsureUserTable。
-func NewDBClient(dsn string) (*DBClient, error) {
-	db, err := gorm.Open(mysql.New(mysql.Config{DSN: dsn}), &gorm.Config{Logger: gormLogger()})
+// The provided slog.Logger is used for GORM's SQL trace logging so that all
+// queries are visible as structured JSON alongside the rest of the application
+// logs.
+//
+// User table (users1) already exists is not modified; only created when missing;
+// see EnsureUserTable.
+func NewDBClient(dsn string, log *slog.Logger) (*DBClient, error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	db, err := gorm.Open(mysql.New(mysql.Config{DSN: dsn}), &gorm.Config{
+		Logger: NewSlogGormLogger(log),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("gorm open: %w", err)
 	}
@@ -42,12 +131,14 @@ func NewDBClient(dsn string) (*DBClient, error) {
 	return &DBClient{DB: db}, nil
 }
 
-// EnsureUserTable 在 users1 不存在时建表，已存在则原样保留。
+// EnsureUserTable creates the users1 table when it does not exist; if it
+// already exists the existing table is left unchanged.
 //
-// 这里刻意不用 db.AutoMigrate：users1 通常是线上已有的表（结构见
-// sql/init_users.sql），AutoMigrate 会按 Go struct 去「对齐」列类型/注释，
-// 每次启动都 ALTER 甚至生成跑不通的 DROP FOREIGN KEY 语句。
-// 建表交给 sql/init_users.sql 或下面的 CreateTable，改表交给人。
+// This deliberately avoids db.AutoMigrate: users1 is typically a pre-existing
+// production table (schema in sql/init_users.sql). AutoMigrate would try to
+// "align" column types/comments and can emit DROP FOREIGN KEY statements that
+// may not run. Table creation is handled by sql/init_users.sql or CreateTable;
+// schema changes should be done manually.
 func EnsureUserTable(db *gorm.DB) error {
 	migrator := db.Migrator()
 	if migrator.HasTable(&models.User{}) {
@@ -59,7 +150,8 @@ func EnsureUserTable(db *gorm.DB) error {
 	return nil
 }
 
-// EnsureUser1Table 在 user1 不存在时建表，已存在则原样保留。
+// EnsureUser1Table creates the user1 table when it does not exist; if it
+// already exists the existing table is left unchanged.
 func EnsureUser1Table(db *gorm.DB) error {
 	migrator := db.Migrator()
 	if migrator.HasTable(&models.User1{}) {

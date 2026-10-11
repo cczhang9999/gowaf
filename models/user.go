@@ -14,9 +14,9 @@ import (
 // 早先这里错写成 users，AutoMigrate 会往那张无关表上加列。
 type User struct {
 	ID        uint      `gorm:"primarykey;autoIncrement" json:"id"`
-	Username  string    `gorm:"size:64;uniqueIndex:username;not null" json:"username"`
+	Username  string    `gorm:"size:64;unique;not null" json:"username"`
 	Password  string    `gorm:"size:255;not null" json:"-"` // bcrypt hash
-	Role      string    `gorm:"size:20;default:'user';not null;index:idx_role" json:"role"`
+	Role      string    `gorm:"size:20;default:'user';not null" json:"role"`
 	PublicKey string    `gorm:"type:text" json:"public_key,omitempty"`
 	Assets    string    `gorm:"type:longtext" json:"assets,omitempty"` // JSON 数组文本
 	Comment   string    `gorm:"size:255" json:"comment,omitempty"`

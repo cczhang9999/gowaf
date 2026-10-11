@@ -11,9 +11,9 @@ import (
 // 表结构由 sql/init_users.sql 创建，这里的 GORM 标签与该表严格对齐
 type User1 struct {
 	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	Username  string    `gorm:"size:64;uniqueIndex:username;not null" json:"username"`
+	Username  string    `gorm:"size:64;unique;not null" json:"username"`
 	Password  string    `gorm:"size:255;not null" json:"-"` // bcrypt hash
-	Role      string    `gorm:"size:20;default:'user';not null;index:idx_role" json:"role"`
+	Role      string    `gorm:"size:20;default:'user';not null" json:"role"`
 	PublicKey string    `gorm:"type:text" json:"public_key,omitempty"`
 	Assets    string    `gorm:"type:longtext" json:"assets,omitempty"` // JSON 数组文本
 	Comment   string    `gorm:"size:255" json:"comment,omitempty"`

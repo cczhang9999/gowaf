@@ -13,7 +13,7 @@ import (
 func newTestAPIServer() *APIServer {
 	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	w := New(Config{Mode: ModeBlock}, DefaultRules(), log)
-	return NewAPIServer(w, ":0")
+	return NewAPIServer(w, ":0", log)
 }
 
 func doReq(s *APIServer, method, path, body string, t *testing.T) *httptest.ResponseRecorder {

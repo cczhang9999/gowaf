@@ -1,11 +1,7 @@
 -- 堡垒机用户表 users1
 --
--- /api/bastion/users 以及 SSH 登录认证读写的就是这张表:
---   GET    /api/bastion/users        列出 users1 全部行
---   POST   /api/bastion/users        插入一行(bcrypt 后的密码)
---   GET    /api/bastion/users/{id}   按 username 或 id 查
---   PUT    /api/bastion/users/{id}   更新行
---   DELETE /api/bastion/users/{id}   删除行
+-- SSH 登录认证读写的就是这张表:
+--   Authenticate / AuthenticatePublicKey 通过 users1 查表验证密码与公钥。
 --
 -- 用法(库名与 gowaf -mysql-dsn 的示例保持一致,按需替换):
 --   mysql -h <host> -P <port> -u <user> -p < sql/init_users.sql

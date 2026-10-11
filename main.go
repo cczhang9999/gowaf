@@ -216,7 +216,7 @@ func main() {
 	// 堡垒机用户表:配置了 -mysql-dsn 时,用户读写落到 users1 表和 user1 表。
 	var userDB *gorm.DB
 	if *mysqlDSN != "" {
-		client, err := store.NewDBClient(*mysqlDSN)
+		client, err := store.NewDBClient(*mysqlDSN, log)
 		if err != nil {
 			fatal("connect to MySQL", err)
 		}

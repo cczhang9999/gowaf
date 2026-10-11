@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"gowaf/bastion"
+	"gowaf/internal/middleware"
 )
 
 // APIServer 提供 RESTful API 用于 WAF 配置和监控
@@ -19,23 +20,29 @@ type APIServer struct {
 	addr       string
 	server     *http.Server
 	upgradeMu  sync.Mutex
+	log        *slog.Logger
 	bastion    *bastion.SSHServer // SSH 堰垒机服务器(可选)
 	bastionLog *slog.Logger
 }
 
-// NewAPIServer 创建 API 服务器
-func NewAPIServer(waf *WAF, addr string) *APIServer {
+// NewAPIServer creates API server
+func NewAPIServer(waf *WAF, addr string, log *slog.Logger) *APIServer {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &APIServer{
 		waf:  waf,
 		addr: addr,
+		log:  log,
 	}
 }
 
-// NewAPIServerWithBastion 创建带 SSH 堰垒机的 API 服务器
+// NewAPIServerWithBastion creates API server with SSH bastion
 func NewAPIServerWithBastion(waf *WAF, addr string, bastionSrv *bastion.SSHServer, log *slog.Logger) *APIServer {
 	return &APIServer{
 		waf:        waf,
 		addr:       addr,
+		log:        log,
 		bastion:    bastionSrv,
 		bastionLog: log,
 	}
@@ -76,9 +83,11 @@ func (s *APIServer) Start() error {
 		mux.Handle("/bastion/", http.StripPrefix("/bastion", bastionNotEnabled))
 	}
 
+	s.log.Info("api server starting", "addr", s.addr)
+
 	s.server = &http.Server{
 		Addr:    s.addr,
-		Handler: mux,
+		Handler: middleware.Logging(s.log)(mux),
 	}
 
 	return s.server.ListenAndServe()
