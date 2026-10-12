@@ -1,0 +1,911 @@
+openapi: 3.0.3
+info:
+  title: GoWAF API
+  description: |
+    GoWAF - Web Application Firewall API
+    
+    提供 WAF 规则管理、配置管理、IP 列表管理、监控和 SSH 堡垒机管理接口。
+  version: 1.0.0
+  contact:
+    name: GoWAF Support
+servers:
+  - url: http://localhost:8081
+    description: 本地开发服务器
+  - url: http://waf.example.com:8081
+    description: 生产环境服务器
+
+tags:
+  - name: Rules
+    description: WAF 规则管理
+  - name: Config
+    description: WAF 配置管理
+  - name: IP List
+    description: IP 白名单/黑名单管理
+  - name: Metrics
+    description: 监控指标
+  - name: Health
+    description: 健康检查
+  - name: Bastion
+    description: SSH 堡垒机管理
+
+paths:
+  /api/rules:
+    get:
+      tags:
+        - Rules
+      summary: 获取所有规则
+      description: 返回当前加载的所有 WAF 规则
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RulesResponse'
+    post:
+      tags:
+        - Rules
+      summary: 批量创建规则
+      description: 批量添加新的 WAF 规则
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/RuleInput'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: 参数错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/rules/{id}:
+    get:
+      tags:
+        - Rules
+      summary: 获取指定规则
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 规则 ID
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Rule'
+        '404':
+          description: 规则不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      tags:
+        - Rules
+      summary: 更新规则
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuleInput'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '404':
+          description: 规则不存在
+    delete:
+      tags:
+        - Rules
+      summary: 删除规则
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '404':
+          description: 规则不存在
+
+  /api/config:
+    get:
+      tags:
+        - Config
+      summary: 获取配置
+      description: 返回当前 WAF 配置
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Config'
+    put:
+      tags:
+        - Config
+      summary: 更新配置
+      description: 更新 WAF 配置(部分字段)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigInput'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: 参数错误
+
+  /api/allow:
+    get:
+      tags:
+        - IP List
+      summary: 获取白名单
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IPListResponse'
+    post:
+      tags:
+        - IP List
+      summary: 添加到白名单
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ips:
+                  type: array
+                  items:
+                    type: string
+                  example: ["192.168.1.0/24", "10.0.0.1"]
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+    delete:
+      tags:
+        - IP List
+      summary: 从白名单移除
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ips:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/deny:
+    get:
+      tags:
+        - IP List
+      summary: 获取黑名单
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IPListResponse'
+    post:
+      tags:
+        - IP List
+      summary: 添加到黑名单
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ips:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+    delete:
+      tags:
+        - IP List
+      summary: 从黑名单移除
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ips:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /api/metrics:
+    get:
+      tags:
+        - Metrics
+      summary: 获取监控指标
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Metrics'
+
+  /api/healthz:
+    get:
+      tags:
+        - Health
+      summary: WAF 健康检查
+      responses:
+        '200':
+          description: 服务正常
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: OK
+
+  /api/bastion/healthz:
+    get:
+      tags:
+        - Health
+      summary: 堡垒机健康检查
+      responses:
+        '200':
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  user_store:
+                    type: string
+                    example: mysql(users1)
+
+  /api/bastion/users:
+    get:
+      tags:
+        - Bastion
+      summary: 获取所有用户
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BastionUsersResponse'
+    post:
+      tags:
+        - Bastion
+      summary: 创建用户
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BastionUserInput'
+      responses:
+        '201':
+          description: 用户创建成功
+        '400':
+          description: 参数错误
+
+  /api/bastion/users/{id}:
+    get:
+      tags:
+        - Bastion
+      summary: 获取指定用户
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 用户名或用户 ID
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BastionUser'
+        '404':
+          description: 用户不存在
+    put:
+      tags:
+        - Bastion
+      summary: 更新用户
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BastionUserInput'
+      responses:
+        '200':
+          description: 成功
+        '404':
+          description: 用户不存在
+    delete:
+      tags:
+        - Bastion
+      summary: 删除用户
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+        '404':
+          description: 用户不存在
+
+  /api/bastion/assets:
+    get:
+      tags:
+        - Bastion
+      summary: 获取所有资产
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BastionAssetsResponse'
+    post:
+      tags:
+        - Bastion
+      summary: 创建资产
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BastionAssetInput'
+      responses:
+        '201':
+          description: 资产创建成功
+
+  /api/bastion/audit:
+    get:
+      tags:
+        - Bastion
+      summary: 获取审计日志
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditLog'
+                  total:
+                    type: integer
+
+  /api/bastion/banned:
+    get:
+      tags:
+        - Bastion
+      summary: 获取禁止命令列表
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  commands:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BannedCommand'
+    post:
+      tags:
+        - Bastion
+      summary: 添加禁止命令
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BannedCommandInput'
+      responses:
+        '201':
+          description: 成功
+
+  /api/bastion/config:
+    get:
+      tags:
+        - Bastion
+      summary: 获取堡垒机配置
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BastionConfig'
+    put:
+      tags:
+        - Bastion
+      summary: 更新堡垒机配置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BastionConfigInput'
+      responses:
+        '200':
+          description: 成功
+
+  /api/bastion/sessions:
+    get:
+      tags:
+        - Bastion
+      summary: 获取所有会话
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Session'
+
+  /api/bastion/sessions/{id}/recording:
+    get:
+      tags:
+        - Bastion
+      summary: 下载会话录像
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 录像文件
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: 会话不存在
+
+components:
+  schemas:
+    Rule:
+      type: object
+      properties:
+        id:
+          type: string
+          example: sqli-001
+        category:
+          type: string
+          example: sqli
+        where:
+          type: string
+          example: query
+        pattern:
+          type: string
+          example: \bunion\b\s+select\b
+        keywords:
+          type: array
+          items:
+            type: string
+          example: ["union", "select"]
+
+    RuleInput:
+      type: object
+      required:
+        - id
+        - pattern
+      properties:
+        id:
+          type: string
+        category:
+          type: string
+        where:
+          type: string
+        pattern:
+          type: string
+
+    RulesResponse:
+      type: object
+      properties:
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/Rule'
+
+    Config:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [block, detect]
+        maxBody:
+          type: integer
+        rps:
+          type: number
+        burst:
+          type: integer
+        trustXFF:
+          type: boolean
+        banStrikes:
+          type: integer
+        banFor:
+          type: string
+        allow:
+          type: array
+          items:
+            type: string
+        deny:
+          type: array
+          items:
+            type: string
+
+    ConfigInput:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [block, detect]
+        maxBody:
+          type: integer
+        rps:
+          type: number
+        burst:
+          type: integer
+        trustXFF:
+          type: boolean
+        banStrikes:
+          type: integer
+        allow:
+          type: array
+          items:
+            type: string
+        deny:
+          type: array
+          items:
+            type: string
+
+    IPListResponse:
+      type: object
+      properties:
+        ips:
+          type: array
+          items:
+            type: string
+
+    Metrics:
+      type: object
+      properties:
+        requests_total:
+          type: integer
+        rule_matched:
+          type: integer
+        blocked:
+          type: integer
+        rate_limited:
+          type: integer
+        rules_loaded:
+          type: integer
+        mode:
+          type: string
+        allow_count:
+          type: integer
+        deny_count:
+          type: integer
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        count:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+
+    BastionUser:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        role:
+          type: string
+          enum: [admin, user, auditor]
+        public_key:
+          type: string
+        assets:
+          type: array
+          items:
+            type: string
+        comment:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    BastionUserInput:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+        role:
+          type: string
+          enum: [admin, user, auditor]
+        public_key:
+          type: string
+        assets:
+          type: array
+          items:
+            type: string
+        comment:
+          type: string
+
+    BastionUsersResponse:
+      type: object
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/BastionUser'
+
+    BastionAsset:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        hostname:
+          type: string
+        port:
+          type: integer
+        username:
+          type: string
+        password:
+          type: string
+        private_key:
+          type: string
+        comment:
+          type: string
+
+    BastionAssetInput:
+      type: object
+      required:
+        - id
+        - hostname
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        hostname:
+          type: string
+        port:
+          type: integer
+        username:
+          type: string
+        password:
+          type: string
+        private_key:
+          type: string
+        comment:
+          type: string
+
+    BastionAssetsResponse:
+      type: object
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/BastionAsset'
+
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        session_id:
+          type: string
+        asset_id:
+          type: string
+        asset_name:
+          type: string
+        action:
+          type: string
+        command:
+          type: string
+        blocked:
+          type: boolean
+        rule_id:
+          type: string
+        client_ip:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    BannedCommand:
+      type: object
+      properties:
+        id:
+          type: string
+        pattern:
+          type: string
+        reason:
+          type: string
+        enabled:
+          type: boolean
+
+    BannedCommandInput:
+      type: object
+      required:
+        - id
+        - pattern
+      properties:
+        id:
+          type: string
+        pattern:
+          type: string
+        reason:
+          type: string
+        enabled:
+          type: boolean
+
+    BastionConfig:
+      type: object
+      properties:
+        ssh_listen_addr:
+          type: string
+        api_listen_addr:
+          type: string
+        max_sessions:
+          type: integer
+        session_idle_timeout:
+          type: string
+
+    BastionConfigInput:
+      type: object
+      properties:
+        max_sessions:
+          type: integer
+        session_idle_timeout:
+          type: string
+
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        asset_id:
+          type: string
+        start_time:
+          type: string
+          format: date-time
+        client_ip:
+          type: string

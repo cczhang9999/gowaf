@@ -19,28 +19,28 @@ type RecordingFormat string
 
 const (
 	FormatAsciinema RecordingFormat = "asciinema" // asciicast v2 format (JSON lines)
-	FormatRaw       RecordingFormat = "raw"        // raw binary capture
+	FormatRaw       RecordingFormat = "raw"       // raw binary capture
 )
 
 // SessionRecord represents a single terminal session recording.
 type SessionRecord struct {
-	ID        string        `json:"id"`          // unique session ID
-	Username  string        `json:"username"`    // user who connected
-	AssetID   string        `json:"asset_id"`     // target asset
-	AssetName string        `json:"asset_name"`   // target asset name
-	StartTime time.Time     `json:"start_time"`   // when session started
-	EndTime   time.Time     `json:"end_time"`     // when session ended (0 if ongoing)
-	Duration  time.Duration `json:"duration"`     // session duration
-	Format    RecordingFile  `json:"-"`           // file handle (not serialized)
+	ID        string        `json:"id"`         // unique session ID
+	Username  string        `json:"username"`   // user who connected
+	AssetID   string        `json:"asset_id"`   // target asset
+	AssetName string        `json:"asset_name"` // target asset name
+	StartTime time.Time     `json:"start_time"` // when session started
+	EndTime   time.Time     `json:"end_time"`   // when session ended (0 if ongoing)
+	Duration  time.Duration `json:"duration"`   // session duration
+	Format    RecordingFile `json:"-"`          // file handle (not serialized)
 }
 
 // RecordingFile holds the open recording file and metadata.
 type RecordingFile struct {
-	path    string
-	file    *os.File
-	writer  *bufio.Writer
-	closed  bool
-	mu      sync.Mutex
+	path   string
+	file   *os.File
+	writer *bufio.Writer
+	closed bool
+	mu     sync.Mutex
 }
 
 // SessionRecorder manages recording of SSH sessions to files.
@@ -80,16 +80,16 @@ func (r *SessionRecorder) StartSession(sessionID, username, assetID, assetName s
 	// Write asciicast v2 header
 	writer := bufWriter(f)
 	header := map[string]any{
-		"version": 2,
-		"width":   80,
-		"height":  24,
+		"version":   2,
+		"width":     80,
+		"height":    24,
 		"timestamp": now.Unix(),
 		"env": map[string]string{
-			"TERM": "xterm-256color",
+			"TERM":  "xterm-256color",
 			"SHELL": "/bin/bash",
 		},
 		"command": fmt.Sprintf("bastion -> %s (%s)", assetName, assetID),
-		"title": fmt.Sprintf("%s @ %s", username, assetName),
+		"title":   fmt.Sprintf("%s @ %s", username, assetName),
 	}
 	headerBytes, _ := json.Marshal(header)
 	fmt.Fprintln(writer, string(headerBytes))
@@ -207,9 +207,9 @@ func decodeTerminalSize(data []byte) (width, height int) {
 
 // RecordingIndex tracks all session recordings for search/listing.
 type RecordingIndex struct {
-	mu         sync.RWMutex
-	records    []*SessionRecord
-	byID       map[string]*SessionRecord
+	mu      sync.RWMutex
+	records []*SessionRecord
+	byID    map[string]*SessionRecord
 }
 
 // NewRecordingIndex creates an empty index.
@@ -295,10 +295,10 @@ func sanitizeUsername(u string) string {
 
 // RawRecorder captures raw I/O bytes with timestamps.
 type RawRecorder struct {
-	path    string
-	file    *os.File
-	start   time.Time
-	mu      sync.Mutex
+	path  string
+	file  *os.File
+	start time.Time
+	mu    sync.Mutex
 }
 
 // NewRawRecorder creates a raw binary recorder.

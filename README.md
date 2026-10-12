@@ -211,6 +211,63 @@ kill -HUP $!          # 改完规则文件后重载;编译失败则保留旧规�
 规则越多,干净流量越慢(每条规则都要扫一遍)。规则上百条后需要做预过滤(先用 `strings.Contains` 或
 Aho-Corasick 筛关键字,再跑正则)。
 
+## 生产环境配置
+
+### 使用配置文件
+
+推荐使用 YAML 配置文件管理所有配置项:
+
+```bash
+# 复制配置示例
+cp config.yaml.example config.yaml
+
+# 使用配置文件启动
+./gowaf -config config.yaml
+```
+
+配置优先于 CLI 默认值,但 CLI flags 会覆盖配置文件中的值。
+
+### 限流配置
+
+```yaml
+rate_limit:
+  enabled: true
+  rps: 50.0                    # 每 IP 每秒请求数
+  burst: 100                   # 令牌桶突发容量
+  strategy: "per_ip"           # per_ip / per_path / per_user
+  
+  # 限流例外路径
+  path_whitelist:
+    - "/api/healthz"
+    - "/api/metrics"
+  
+  # 按路径差异化限流
+  path_rules:
+    - path: "/api/*"
+      rps: 30.0
+      burst: 60
+    - path: "/login"
+      rps: 10.0
+      burst: 20
+  
+  # 自动封禁
+  auto_ban:
+    enabled: true
+    strikes: 5                 # 1分钟内违规次数
+    window: "1m"              # 时间窗口
+    duration: "10m"            # 封禁时长
+```
+
+详细配置说明见 [config.yaml.example](config.yaml.example)
+
+## 生产环境文档
+
+- [部署指南](docs/deployment-guide.md) - Docker、Kubernetes、systemd 部署
+- [安全加固指南](docs/security-hardening.md) - 网络安全、访问控制、审计
+- [性能调优指南](docs/performance-tuning.md) - 限流、连接池、内核参数
+- [监控与可观测性](docs/monitoring.md) - Prometheus、Grafana、日志分析
+- [API 文档](docs/openapi.yaml) - OpenAPI 3.0 规范 (Swagger UI)
+
 ## 已知局限(这不是生产级 WAF)
 
 - 正则规则必然有误报/漏报;上线前先用 `-mode detect` 跑一段时间看日志
@@ -218,5 +275,4 @@ Aho-Corasick 筛关键字,再跑正则)。
 - 不检查响应内容,没有 TLS 终止(可用 `ListenAndServeTLS` 或放在 Nginx/LB 后面)
 - 没有语义级检测(libinjection 那类 tokenizer),也没有 OWASP CRS 那种异常评分机制
 - 需要真正的生产方案时,可以看 Go 写的 OWASP Coraza(兼容 ModSecurity 规则语法和 CRS),
-  它同样大量用到上面这些 Go 特性# gowaf
-# gowaf
+  它同样大量用到上面这些 Go 特性

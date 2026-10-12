@@ -43,14 +43,14 @@ type SSHServer struct {
 
 	sshConfig *ssh.ServerConfig
 
-	authStore     *AuthStore
-	dbAuthStore   *DatabaseAuthStore   // Option for MySQL-based user persistence (users1 table)
-	dbAuthStore1  *DatabaseAuthStore1  // Option for MySQL-based user persistence (user1 table)
-	assetStore    *AssetStore
-	auditLogger   *AuditLogger
-	auditStore    *AuditStore
-	recorder      *SessionRecorder
-	recordingIdx  *RecordingIndex
+	authStore    *AuthStore
+	dbAuthStore  *DatabaseAuthStore  // Option for MySQL-based user persistence (users1 table)
+	dbAuthStore1 *DatabaseAuthStore1 // Option for MySQL-based user persistence (user1 table)
+	assetStore   *AssetStore
+	auditLogger  *AuditLogger
+	auditStore   *AuditStore
+	recorder     *SessionRecorder
+	recordingIdx *RecordingIndex
 
 	listener net.Listener
 
@@ -142,6 +142,15 @@ func NewSSHServerWithDB(cfg *BastionConfig, log *slog.Logger, db *gorm.DB) (*SSH
 		}
 		srv.dbAuthStore1 = dbAuthStore1
 		log.Info("database-backed user persistence enabled (user1 table)")
+	} else {
+		// No database configured: Register1/AddUser/HasUser1/etc. all fall
+		// back to the in-memory AuthStore. POST /api/bastion/users will
+		// still return 201 but data lives only in RAM (lost on restart)
+		// and no SQL is logged — this is the #1 cause of "user1 table
+		// stays empty" bug reports.
+		log.Warn("database not configured: bastion users stored in memory only — " +
+			"data will NOT be persisted to the user1/users1 tables, and no SQL query logs will be emitted. " +
+			"Pass a MySQL DSN (e.g. -mysql-dsn) to enable database persistence.")
 	}
 
 	return srv, nil

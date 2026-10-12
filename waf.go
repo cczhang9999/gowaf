@@ -47,8 +47,8 @@ var fieldPool = sync.Pool{
 
 type WAF struct {
 	config  Config
-	rules   atomic.Pointer[[]Rule]             // 规则热更新:整体替换指针,读路径无锁
-	kwRe    atomic.Pointer[regexp.Regexp]      // 由所有规则关键词组合的全局预过滤正则
+	rules   atomic.Pointer[[]Rule]        // 规则热更新:整体替换指针,读路径无锁
+	kwRe    atomic.Pointer[regexp.Regexp] // 由所有规则关键词组合的全局预过滤正则
 	limiter *Limiter
 	banner  *AutoBanner
 	log     *slog.Logger

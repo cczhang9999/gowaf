@@ -223,7 +223,7 @@ func main() {
 		userDB = client.DB
 		log.Info("bastion users persisted to MySQL", "table", models.UserTableName, "table1", models.User1TableName)
 	} else {
-		log.Info("bastion users kept in memory, pass -mysql-dsn to persist them to users1/user1 tables")
+		log.Warn("bastion users kept in memory: POST /api/bastion/users returns 201 but data is NOT persisted to the user1/users1 tables — pass -mysql-dsn to enable database persistence and SQL logging")
 	}
 
 	bastionSrv, bErr := bastion.NewSSHServerWithDB(bastionCfg, log, userDB)

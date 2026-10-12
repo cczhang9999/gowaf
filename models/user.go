@@ -15,7 +15,7 @@ import (
 type User struct {
 	ID        uint      `gorm:"primarykey;autoIncrement" json:"id"`
 	Username  string    `gorm:"size:64;unique;not null" json:"username"`
-	Password  string    `gorm:"size:255;not null" json:"-"` // bcrypt hash
+	Password  string    `gorm:"size:255" json:"-"` // bcrypt hash, can be empty for pubkey-only users
 	Role      string    `gorm:"size:20;default:'user';not null" json:"role"`
 	PublicKey string    `gorm:"type:text" json:"public_key,omitempty"`
 	Assets    string    `gorm:"type:longtext" json:"assets,omitempty"` // JSON 数组文本

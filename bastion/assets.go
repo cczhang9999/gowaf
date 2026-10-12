@@ -10,11 +10,11 @@ import (
 
 // Asset represents a backend server that users can connect to through the bastion.
 type Asset struct {
-	ID          string `json:"id"`          // unique identifier, e.g. "asset-001"
-	Name        string `json:"name"`        // human-readable label
-	Hostname    string `json:"hostname"`    // IP or DNS name
-	Port        int    `json:"port"`        // SSH port, 0 means use config default
-	Username    string `json:"username"`    // SSH user, empty means use config default
+	ID       string `json:"id"`       // unique identifier, e.g. "asset-001"
+	Name     string `json:"name"`     // human-readable label
+	Hostname string `json:"hostname"` // IP or DNS name
+	Port     int    `json:"port"`     // SSH port, 0 means use config default
+	Username string `json:"username"` // SSH user, empty means use config default
 	// Password is the backend SSH password (for password auth to the asset).
 	// In production this should be encrypted or fetched from a vault.
 	Password string `json:"-"` // never serialize
@@ -130,8 +130,8 @@ func (a Asset) MarshalJSON() ([]byte, error) {
 		Password   string `json:"-"`
 		PrivateKey string `json:"-"`
 	}{
-		Alias:       (Alias)(a),
-		Password:    "",
-		PrivateKey:  "",
+		Alias:      (Alias)(a),
+		Password:   "",
+		PrivateKey: "",
 	})
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
@@ -23,12 +24,29 @@ type shard struct {
 // 核心思路:把不同 IP 散列到 32 个 shard(分片)中,每片一把锁。
 // 这样同一时间只有落在同一分片的 IP 才会抢锁,不同分片完全并行 ——
 // 高并发下不同 IP 基本不互相阻塞。
-// 默认 32 分片,经验值:在 2 核机器上已能跑满网卡。 
+// 默认 32 分片,经验值:在 2 核机器上已能跑满网卡.
 type Limiter struct {
 	shards [shardCount]shard
 	rate   float64 // 每秒补充的令牌数
 	burst  float64
 	now    func() time.Time // 可替换,便于测试注入假时钟
+}
+
+// PathLimiter 是按 IP + 路径的令牌桶限流器。
+// 支持全局限流和路径特定限流。
+type PathLimiter struct {
+	// 全局限流器
+	global *Limiter
+
+	// 路径特定限流器 (key 是路径模式)
+	pathLimiters map[string]*Limiter
+
+	// 限流例外路径
+	whitelist []string
+
+	// 全局配置
+	globalRate  float64
+	globalBurst int
 }
 
 func NewLimiter(rps float64, burst int) *Limiter {
@@ -170,4 +188,148 @@ func (b *AutoBanner) GC() {
 			delete(b.strikes, ip)
 		}
 	}
+}
+
+// PathLimiterConfig 路径限流器配置
+type PathLimiterConfig struct {
+	GlobalRate  float64
+	GlobalBurst int
+	Whitelist   []string
+	PathRules   []PathRateLimitRule
+}
+
+type PathRateLimitRule struct {
+	Path  string
+	Rate  float64
+	Burst int
+}
+
+// NewPathLimiter 创建路径限流器
+func NewPathLimiter(cfg PathLimiterConfig) *PathLimiter {
+	pl := &PathLimiter{
+		global:       NewLimiter(cfg.GlobalRate, cfg.GlobalBurst),
+		pathLimiters: make(map[string]*Limiter),
+		whitelist:    cfg.Whitelist,
+		globalRate:   cfg.GlobalRate,
+		globalBurst:  cfg.GlobalBurst,
+	}
+
+	// 创建路径特定限流器
+	for _, rule := range cfg.PathRules {
+		pl.pathLimiters[rule.Path] = NewLimiter(rule.Rate, rule.Burst)
+	}
+
+	return pl
+}
+
+// IsWhitelisted 检查路径是否在白名单中
+func (pl *PathLimiter) IsWhitelisted(path string) bool {
+	for _, p := range pl.whitelist {
+		if p == path {
+			return true
+		}
+		if strings.HasSuffix(p, "*") {
+			prefix := strings.TrimSuffix(p, "*")
+			if strings.HasPrefix(path, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Allow 检查是否允许请求,优先使用路径特定的限流规则
+func (pl *PathLimiter) Allow(ip netip.Addr, path string) (bool, time.Duration) {
+	// 检查白名单
+	if pl.IsWhitelisted(path) {
+		return true, 0
+	}
+
+	// 检查路径特定的限流规则
+	for pathPattern, limiter := range pl.pathLimiters {
+		if pathPattern == "*" || pathPattern == path {
+			if ok, wait := limiter.Allow(ip); ok {
+				return true, 0
+			} else {
+				return false, wait
+			}
+		}
+		if strings.HasSuffix(pathPattern, "*") {
+			prefix := strings.TrimSuffix(pathPattern, "*")
+			if strings.HasPrefix(path, prefix) {
+				if ok, wait := limiter.Allow(ip); ok {
+					return true, 0
+				} else {
+					return false, wait
+				}
+			}
+		}
+	}
+
+	// 使用全局限流规则
+	return pl.global.Allow(ip)
+}
+
+// AllowWithGlobal 同时使用全局和路径限流规则,两个都通过才算通过
+func (pl *PathLimiter) AllowWithGlobal(ip netip.Addr, path string) (bool, time.Duration) {
+	// 检查白名单
+	if pl.IsWhitelisted(path) {
+		return true, 0
+	}
+
+	// 先检查路径限流
+	for pathPattern, limiter := range pl.pathLimiters {
+		if pathPattern == "*" || pathPattern == path {
+			if ok, wait := limiter.Allow(ip); !ok {
+				return false, wait
+			}
+		} else if strings.HasSuffix(pathPattern, "*") {
+			prefix := strings.TrimSuffix(pathPattern, "*")
+			if strings.HasPrefix(path, prefix) {
+				if ok, wait := limiter.Allow(ip); !ok {
+					return false, wait
+				}
+			}
+		}
+	}
+
+	// 再检查全局限流
+	return pl.global.Allow(ip)
+}
+
+// GC 清理所有限流器
+func (pl *PathLimiter) GC(ttl time.Duration) {
+	pl.global.GC(ttl)
+	for _, limiter := range pl.pathLimiters {
+		limiter.GC(ttl)
+	}
+}
+
+// Stats 返回限流器统计信息
+type LimiterStats struct {
+	GlobalRate  float64     `json:"global_rate"`
+	GlobalBurst int         `json:"global_burst"`
+	Paths       []PathStats `json:"paths"`
+}
+
+type PathStats struct {
+	Path  string  `json:"path"`
+	Rate  float64 `json:"rate"`
+	Burst int     `json:"burst"`
+}
+
+func (pl *PathLimiter) Stats() LimiterStats {
+	stats := LimiterStats{
+		GlobalRate:  pl.globalRate,
+		GlobalBurst: pl.globalBurst,
+		Paths:       make([]PathStats, 0, len(pl.pathLimiters)),
+	}
+	for path, limiter := range pl.pathLimiters {
+		stats.Paths = append(stats.Paths, PathStats{
+			Path:  path,
+			Rate:  limiter.rate,
+			Burst: int(limiter.burst),
+		})
+	}
+	return stats
 }

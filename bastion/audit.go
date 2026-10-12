@@ -14,28 +14,28 @@ import (
 type CommandAction string
 
 const (
-	ActionCommand CommandAction = "command"     // a command was executed
-	ActionLogin   CommandAction = "login"       // session login
-	ActionLogout  CommandAction = "logout"      // session logout
-	ActionBlocked CommandAction = "blocked"       // dangerous command blocked
-	ActionRename  CommandAction = "rename"      // terminal renamed (e.g., window title)
+	ActionCommand CommandAction = "command" // a command was executed
+	ActionLogin   CommandAction = "login"   // session login
+	ActionLogout  CommandAction = "logout"  // session logout
+	ActionBlocked CommandAction = "blocked" // dangerous command blocked
+	ActionRename  CommandAction = "rename"  // terminal renamed (e.g., window title)
 )
 
 // AuditEvent represents a single audited action.
 type AuditEvent struct {
-	Timestamp  time.Time      `json:"timestamp"`
-	Username   string         `json:"username"`
-	SessionID  string         `json:"session_id"`
-	AssetID    string         `json:"asset_id"`
-	AssetName  string         `json:"asset_name"`
-	Action     CommandAction  `json:"action"`
-	Command    string         `json:"command,omitempty"`     // the command (for command events)
-	WorkingDir string         `json:"working_dir,omitempty"` // working directory at time of command
-	ExitCode   int            `json:"exit_code,omitempty"`   // exit code (for command events)
-	Blocked    bool           `json:"blocked,omitempty"`     // whether the command was blocked
-	RuleID     string         `json:"rule_id,omitempty"`     // if blocked, which rule triggered
-	RawInput   string         `json:"raw_input,omitempty"`   // raw input line
-	ClientIP   string         `json:"client_ip,omitempty"`   // SSH client IP
+	Timestamp  time.Time     `json:"timestamp"`
+	Username   string        `json:"username"`
+	SessionID  string        `json:"session_id"`
+	AssetID    string        `json:"asset_id"`
+	AssetName  string        `json:"asset_name"`
+	Action     CommandAction `json:"action"`
+	Command    string        `json:"command,omitempty"`     // the command (for command events)
+	WorkingDir string        `json:"working_dir,omitempty"` // working directory at time of command
+	ExitCode   int           `json:"exit_code,omitempty"`   // exit code (for command events)
+	Blocked    bool          `json:"blocked,omitempty"`     // whether the command was blocked
+	RuleID     string        `json:"rule_id,omitempty"`     // if blocked, which rule triggered
+	RawInput   string        `json:"raw_input,omitempty"`   // raw input line
+	ClientIP   string        `json:"client_ip,omitempty"`   // SSH client IP
 }
 
 // AuditLogger writes structured audit events to a file in JSON Lines format.
@@ -168,10 +168,10 @@ func (s *AuditStore) CountByAction() map[string]int {
 
 // BannedCommand represents a pattern for blocking commands.
 type BannedCommand struct {
-	ID      string `json:"id"`       // unique identifier
-	Pattern   string `json:"pattern"`  // substring or regex to match
-	Reason  string `json:"reason"`   // why this command is blocked
-	Enabled bool   `json:"enabled"`  // whether this rule is active
+	ID      string `json:"id"`      // unique identifier
+	Pattern string `json:"pattern"` // substring or regex to match
+	Reason  string `json:"reason"`  // why this command is blocked
+	Enabled bool   `json:"enabled"` // whether this rule is active
 }
 
 // AddBannedCommand adds a new command blocking rule.

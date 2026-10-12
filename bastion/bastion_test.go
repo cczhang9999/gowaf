@@ -444,12 +444,12 @@ func TestSessionID(t *testing.T) {
 
 func TestAssetMarshalJSON(t *testing.T) {
 	a := Asset{
-		ID:       "test-001",
-		Name:     "test-host",
-		Hostname: "192.168.1.1",
-		Port:     22,
-		Password: "secret",     // should be hidden
-		PrivateKey: "private",  // should be hidden
+		ID:         "test-001",
+		Name:       "test-host",
+		Hostname:   "192.168.1.1",
+		Port:       22,
+		Password:   "secret",  // should be hidden
+		PrivateKey: "private", // should be hidden
 	}
 
 	data, err := json.Marshal(a)

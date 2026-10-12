@@ -8,11 +8,11 @@ import (
 
 // User1 对应数据库 user1 表（堡垒机用户管理表）。
 // 表结构类似于 User，但表名为 user1（不带 's'）。
-// 表结构由 sql/init_users.sql 创建，这里的 GORM 标签与该表严格对齐
+// 表结构由 sql/init_user1.sql 创建，这里的 GORM 标签与该表严格对齐
 type User1 struct {
 	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
 	Username  string    `gorm:"size:64;unique;not null" json:"username"`
-	Password  string    `gorm:"size:255;not null" json:"-"` // bcrypt hash
+	Password  string    `gorm:"size:255" json:"-"` // bcrypt hash, can be empty for pubkey-only users
 	Role      string    `gorm:"size:20;default:'user';not null" json:"role"`
 	PublicKey string    `gorm:"type:text" json:"public_key,omitempty"`
 	Assets    string    `gorm:"type:longtext" json:"assets,omitempty"` // JSON 数组文本

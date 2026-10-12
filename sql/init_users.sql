@@ -15,7 +15,7 @@ USE myapp;
 CREATE TABLE IF NOT EXISTS users1 (
     id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     username      VARCHAR(64) NOT NULL UNIQUE COMMENT '用户名',
-    password      VARCHAR(255) NOT NULL COMMENT 'bcrypt 加密后的密码',
+    password      VARCHAR(255) DEFAULT NULL COMMENT 'bcrypt 加密后的密码',
     role          VARCHAR(20) NOT NULL DEFAULT 'user' COMMENT '角色：admin/user/auditor',
     public_key    TEXT DEFAULT NULL COMMENT 'SSH 公钥',
     assets        LONGTEXT DEFAULT NULL COMMENT '可访问资产 JSON 数组',
