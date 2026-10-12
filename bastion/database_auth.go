@@ -379,15 +379,26 @@ func (s *DatabaseAuthStore1) GetUser1ByID(id uint) (*User, bool) {
 
 // ListUsers1 返回 user1 表中的全部用户。
 func (s *DatabaseAuthStore1) ListUsers1() []*User {
-	ms, err := s.repo.ListUsers1(context.Background())
+	users, err := s.ListUsers1WithErr()
 	if err != nil {
 		return []*User{}
+	}
+	return users
+}
+
+// ListUsers1WithErr 与 ListUsers1 相同,但把数据库错误透传给调用方。
+// 管理 API 用它区分「表里确实没有用户」和「数据库连不上/查询失败」——
+// 后者不该被静默伪装成空列表。
+func (s *DatabaseAuthStore1) ListUsers1WithErr() ([]*User, error) {
+	ms, err := s.repo.ListUsers1(context.Background())
+	if err != nil {
+		return nil, err
 	}
 	users := make([]*User, 0, len(ms))
 	for _, m := range ms {
 		users = append(users, user1FromModel(m))
 	}
-	return users
+	return users, nil
 }
 
 // HasUser1 检查用户是否存在。

@@ -360,7 +360,7 @@ paths:
                     example: ok
                   user_store:
                     type: string
-                    example: mysql(users1)
+                    example: mysql(user1)
 
   /api/bastion/users:
     get:

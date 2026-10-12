@@ -408,7 +408,10 @@ func main() {
 	// 堡垒机用户表:配置了 -mysql-dsn 时,用户读写落到 users1 表和 user1 表。
 	var userDB *gorm.DB
 	if cfg.MySQLDSN != "" {
-		client, err := store.NewDBClient(*mysqlDSN, log)
+		// 注意:必须用 cfg.MySQLDSN(已合并 YAML + CLI),不能直接用 *mysqlDSN,
+		// 否则仅通过 -config 提供 DSN 时这里会传空串,gorm 会回落到
+		// 127.0.0.1:3306 并连接失败。
+		client, err := store.NewDBClient(cfg.MySQLDSN, log)
 		if err != nil {
 			fatal("connect to MySQL", err)
 		}

@@ -1,37 +1,101 @@
 <template>
   <div class="page-wrapper">
-    <div class="page-header">
-      <h2 class="page-title">规则管理</h2>
-      <el-button type="primary" @click="handleCreate">
-        <template #icon>
-          <Plus />
-        </template>
-        添加规则
-      </el-button>
+    <div class="page-head">
+      <div class="page-head__text">
+        <h2 class="page-title">规则管理</h2>
+        <div class="page-subtitle">
+          <span>共 {{ wafStore.rules.length }} 条规则</span>
+          <span class="source-chip">Go RE2 正则 · 支持 SIGHUP 热加载</span>
+        </div>
+      </div>
+      <div class="page-head__actions">
+        <el-button type="primary" @click="handleCreate">
+          <template #icon>
+            <Plus />
+          </template>
+          添加规则
+        </el-button>
+      </div>
     </div>
 
-    <el-table :data="wafStore.rules" class="w-full" height="400" :row-key="row => row.id">
-      <el-table-column prop="id" label="规则 ID" width="150" />
-      <el-table-column prop="category" label="类别" width="120">
-        <template #default="scope">
-          <el-tag :type="getCategoryTag(scope.row.category)">
-            {{ scope.row.category }}
-          </el-tag>
+    <div class="toolbar">
+      <el-input
+        v-model="keyword"
+        placeholder="搜索规则 ID / 正则"
+        clearable
+        style="width: 240px"
+      >
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
+      <el-select v-model="categoryFilter" placeholder="全部类别" clearable style="width: 170px">
+        <el-option
+          v-for="c in categoryOptions"
+          :key="c"
+          :label="c"
+          :value="c"
+        />
+      </el-select>
+      <el-button v-if="keyword || categoryFilter" link type="primary" @click="clearFilters">
+        清除筛选
+      </el-button>
+      <div class="toolbar__spacer" />
+      <span class="toolbar__count">显示 {{ filteredRules.length }} / {{ wafStore.rules.length }} 条</span>
+    </div>
+
+    <div class="panel">
+      <el-table
+        :data="filteredRules"
+        class="w-full"
+        :row-key="(row: Rule) => row.id"
+      >
+        <el-table-column prop="id" label="规则 ID" width="150" />
+        <el-table-column prop="category" label="类别" width="140">
+          <template #default="scope">
+            <el-tag :type="getCategoryTag(scope.row.category)" effect="light">
+              {{ scope.row.category }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="where" label="检测位置" width="150" />
+        <el-table-column prop="pattern" label="正则表达式" min-width="300" show-overflow-tooltip>
+          <template #default="scope">
+            <code class="pattern-code">{{ scope.row.pattern }}</code>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="180" fixed="right">
+          <template #default="scope">
+            <div class="table-actions">
+              <el-button size="small" @click="handleEdit(scope.row)">
+                <el-icon><Edit /></el-icon>
+                编辑
+              </el-button>
+              <el-button
+                size="small"
+                type="danger"
+                plain
+                @click="handleDelete(scope.row)"
+                v-if="scope.row.id !== 'scan-001'"
+              >
+                <el-icon><Delete /></el-icon>
+                删除
+              </el-button>
+            </div>
+          </template>
+        </el-table-column>
+
+        <template #empty>
+          <div class="empty-state">
+            <div class="empty-state__icon">🛡️</div>
+            <div class="empty-state__title">
+              {{ keyword || categoryFilter ? '没有匹配的规则' : '暂无规则' }}
+            </div>
+            <div class="empty-state__hint">
+              {{ keyword || categoryFilter ? '试试调整搜索条件或类别筛选' : '点击右上角「添加规则」新建一条检测规则' }}
+            </div>
+          </div>
         </template>
-      </el-table-column>
-      <el-table-column prop="where" label="检测位置" width="150" />
-      <el-table-column prop="pattern" label="正则表达式" width="300" show-overflow-tooltip />
-      <el-table-column label="操作" width="180" fixed="right">
-        <template #default="scope">
-          <el-button size="small" @click="handleEdit(scope.row)">
-            编辑
-          </el-button>
-          <el-button size="small" type="danger" @click="handleDelete(scope.row)" v-if="scope.row.id !== 'scan-001'">
-            删除
-          </el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+      </el-table>
+    </div>
 
     <!-- 规则编辑弹窗 -->
     <el-dialog :title="editingRule ? '编辑规则' : '添加规则'" v-model="showDialog" width="600px">
@@ -84,13 +148,38 @@
 <script lang="ts" setup>
 import { ref, computed } from 'vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { Plus, Search, Edit, Delete } from '@element-plus/icons-vue'
 import { useWafStore, type Rule } from '@/stores/waf'
 
 const wafStore = useWafStore()
 
 const showDialog = ref(false)
 const editingRule = ref<Rule | null>(null)
+const keyword = ref('')
+const categoryFilter = ref('')
+
+const categoryOptions = [
+  'sqli', 'xss', 'path_traversal', 'cmd_injection',
+  'rce', 'scanner', 'admin_probe', 'other',
+]
+
+const filteredRules = computed(() => {
+  const kw = keyword.value.trim().toLowerCase()
+  return wafStore.rules.filter((r) => {
+    if (categoryFilter.value && r.category !== categoryFilter.value) return false
+    if (!kw) return true
+    return (
+      r.id.toLowerCase().includes(kw) ||
+      (r.pattern || '').toLowerCase().includes(kw)
+    )
+  })
+})
+
+const clearFilters = () => {
+  keyword.value = ''
+  categoryFilter.value = ''
+}
+
 const form = ref<{
   id: string
   category: string

@@ -1,166 +1,203 @@
 <template>
-  <div class="banned-page">
+  <div class="page-wrapper">
     <el-alert
-      v-if="!bastionStore.bastionEnabled"
-      :title="bastionStore.bastionError || 'SSH bastion is not enabled'"
+      v-if="bastionStore.bastionEnabled === false"
+      :title="bastionStore.bastionError || 'SSH 堡垒机未启用，启动时加 -ssh 参数即可开启'"
       type="warning"
-      style="margin-bottom: 20px;"
+      show-icon
+      :closable="false"
+      style="margin-bottom: 16px;"
     />
-    <div class="page-header">
-      <h2 class="page-title">禁止命令</h2>
-      <el-button type="primary" :disabled="!bastionStore.bastionEnabled" @click="showDialog = true">
-        <Plus />
-        添加规则
-      </el-button>
+
+    <div class="page-head">
+      <div class="page-head__text">
+        <h2 class="page-title">禁止命令</h2>
+        <div class="page-subtitle">
+          <span>命中即拦截并记录审计</span>
+          <span class="source-chip">共 {{ bastionStore.bannedCommands.length }} 条规则</span>
+        </div>
+      </div>
+      <div class="page-head__actions">
+        <el-button type="primary" :disabled="bastionStore.bastionEnabled === false" @click="openCreate">
+          <el-icon><Plus /></el-icon>
+          添加规则
+        </el-button>
+      </div>
     </div>
 
-    <el-card>
-      <el-table :data="bastionStore.bannedCommands" style="width: 100%" v-loading="bastionStore.loading">
+    <div class="toolbar">
+      <el-input v-model="keyword" placeholder="搜索匹配模式 / 原因" clearable style="width: 260px">
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
+      <div class="toolbar__spacer" />
+      <span class="toolbar__count">显示 {{ filteredCommands.length }} / {{ bastionStore.bannedCommands.length }} 条</span>
+    </div>
+
+    <div class="panel">
+      <el-table :data="filteredCommands" style="width: 100%" v-loading="bastionStore.loading">
         <el-table-column prop="id" label="ID" width="140" />
-        <el-table-column prop="pattern" label="匹配模式" width="200" />
-        <el-table-column prop="reason" label="原因" />
-        <el-table-column prop="enabled" label="状态" width="100">
+        <el-table-column label="匹配模式" min-width="200">
           <template #default="scope">
-            <el-tag :type="scope.row.enabled ? 'success' : 'info'">
+            <span class="mono">{{ scope.row.pattern }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="reason" label="原因" min-width="180" show-overflow-tooltip>
+          <template #default="scope">
+            <span :class="{ 'text-disabled': !scope.row.reason }">{{ scope.row.reason || '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="100">
+          <template #default="scope">
+            <el-tag :type="scope.row.enabled ? 'success' : 'info'" effect="light">
               {{ scope.row.enabled ? '启用' : '禁用' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right">
+        <el-table-column label="操作" width="180" fixed="right">
           <template #default="scope">
-            <el-button
-              size="small"
-              :type="scope.row.enabled ? 'warning' : 'success'"
-              @click="toggleCommand(scope.row)"
-            >
-              {{ scope.row.enabled ? '禁用' : '启用' }}
-            </el-button>
-            <el-button size="small" type="danger" @click="deleteCommand(scope.row)">
-              <Delete />
-              删除
-            </el-button>
+            <div class="table-actions">
+              <el-button
+                size="small"
+                :type="scope.row.enabled ? 'warning' : 'success'"
+                plain
+                @click="toggleCommand(scope.row)"
+              >
+                {{ scope.row.enabled ? '禁用' : '启用' }}
+              </el-button>
+              <el-button size="small" type="danger" plain @click="deleteCommand(scope.row)">
+                <el-icon><Delete /></el-icon>
+                删除
+              </el-button>
+            </div>
           </template>
         </el-table-column>
-      </el-table>
-    </el-card>
 
-    <!-- Add Command Dialog -->
-    <el-dialog v-model="showDialog" :title="dialogTitle" @closed="showDialog = false">
-      <el-form :model="form" label-width="100px">
-        <el-form-item label="ID" required>
-          <el-input v-model="form.id" placeholder="规则 ID,如: ban-009" />
+        <template #empty>
+          <div class="empty-state">
+            <div class="empty-state__icon">🚫</div>
+            <div class="empty-state__title">
+              {{ keyword ? '没有匹配的规则' : '暂无禁止命令规则' }}
+            </div>
+            <div class="empty-state__hint">
+              {{ keyword ? '试试调整搜索关键词' : '点击右上角「添加规则」定义需要拦截的危险命令' }}
+            </div>
+          </div>
+        </template>
+      </el-table>
+    </div>
+
+    <!-- 添加禁止命令弹窗 -->
+    <el-dialog v-model="showDialog" title="添加禁止命令规则" width="520px" @closed="resetForm">
+      <el-form ref="formRef" :model="form" :rules="rules" label-width="96px">
+        <el-form-item label="规则 ID" prop="id">
+          <el-input v-model="form.id" placeholder="留空自动生成，如：ban-009" />
         </el-form-item>
-        <el-form-item label="匹配模式" required>
-          <el-input v-model="form.pattern" placeholder="匹配关键词/模式(不区分大小写)" />
+        <el-form-item label="匹配模式" prop="pattern">
+          <el-input v-model="form.pattern" placeholder="匹配关键词/模式（不区分大小写）" />
         </el-form-item>
         <el-form-item label="原因">
           <el-input v-model="form.reason" placeholder="为什么禁止这个命令" />
         </el-form-item>
         <el-form-item label="状态">
-          <el-switch
-            v-model="form.enabled"
-            active-text="启用"
-            inactive-text="禁用"
-          />
+          <el-switch v-model="form.enabled" active-text="启用" inactive-text="禁用" />
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="showDialog = false">取消</el-button>
-        <el-button type="primary" @click="saveCommand">保存</el-button>
+        <el-button type="primary" :loading="saving" @click="saveCommand">保存</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script lang="ts" setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Delete } from '@element-plus/icons-vue'
+import type { FormInstance, FormRules } from 'element-plus'
+import { Plus, Delete, Search } from '@element-plus/icons-vue'
 import { useBastionStore } from '@/stores/bastion'
 import type { BastionBannedCommand } from '@/stores/bastion'
 
 const bastionStore = useBastionStore()
 const showDialog = ref(false)
+const saving = ref(false)
+const keyword = ref('')
+const formRef = ref<FormInstance>()
 
-const form = ref({
-  id: '',
-  pattern: '',
-  reason: '',
-  enabled: true,
+const emptyForm = () => ({ id: '', pattern: '', reason: '', enabled: true })
+const form = ref(emptyForm())
+
+const rules: FormRules = {
+  pattern: [{ required: true, message: '请输入匹配模式', trigger: 'blur' }],
+}
+
+const filteredCommands = computed(() => {
+  const kw = keyword.value.trim().toLowerCase()
+  if (!kw) return bastionStore.bannedCommands
+  return bastionStore.bannedCommands.filter((c) =>
+    (c.pattern || '').toLowerCase().includes(kw) ||
+    (c.reason || '').toLowerCase().includes(kw),
+  )
 })
 
-const dialogTitle = '添加禁止命令规则'
+const resetForm = () => {
+  form.value = emptyForm()
+  formRef.value?.clearValidate()
+}
 
-const loadData = () => {
-  bastionStore.loadBannedCommands()
+const openCreate = () => {
+  resetForm()
+  showDialog.value = true
 }
 
 const saveCommand = async () => {
-  if (!form.value.id) {
-    form.value.id = 'ban-' + Date.now().toString().slice(-5)
-  }
-  if (!form.value.pattern) {
-    // Can't use ElMessage without import, but we can alert
-    alert('请输入匹配模式')
-    return
-  }
+  if (!formRef.value) return
+  const valid = await formRef.value.validate().catch(() => false)
+  if (!valid) return
+
+  saving.value = true
   try {
     await bastionStore.addBannedCommand({
-      id: form.value.id,
+      id: form.value.id || `ban-${Date.now().toString().slice(-5)}`,
       pattern: form.value.pattern,
       reason: form.value.reason,
       enabled: form.value.enabled,
     } as BastionBannedCommand)
-    // Reset and close
-    form.value = { id: '', pattern: '', reason: '', enabled: true }
+    ElMessage.success('已添加')
     showDialog.value = false
-  } catch (e: any) {
-    alert(e?.message || '保存失败')
+    resetForm()
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.error || error?.message || '保存失败')
+  } finally {
+    saving.value = false
   }
 }
 
 const toggleCommand = (cmd: BastionBannedCommand) => {
-  // Toggle enabled state (note: in full implementation, this would call an API endpoint)
+  // 后端暂未提供启停接口，这里只做前端展示态切换
   cmd.enabled = !cmd.enabled
-  // In a real implementation, you'd call an API to update this
-  // For now, we just show a message
+  ElMessage.info(`已在本地${cmd.enabled ? '启用' : '禁用'}「${cmd.pattern}」（后端未持久化）`)
 }
 
 const deleteCommand = async (cmd: BastionBannedCommand) => {
   try {
-    await ElMessageBox.confirm(`删除禁止命令规则 "${cmd.pattern}" 吗？`, '删除确认', {
-      type: 'warning',
-    })
-    // In a real implementation, you'd call an API to delete this
-    // For now, we just remove from the list locally
-    const idx = bastionStore.bannedCommands.indexOf(cmd)
-    if (idx >= 0) {
-      bastionStore.bannedCommands.splice(idx, 1)
-    }
+    await ElMessageBox.confirm(
+      `确定删除禁止命令规则「${cmd.pattern}」吗？`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
   } catch {
-    // Cancelled
+    return // 取消
+  }
+  // 后端暂未提供删除接口，这里只从本地列表移除
+  const idx = bastionStore.bannedCommands.indexOf(cmd)
+  if (idx >= 0) {
+    bastionStore.bannedCommands.splice(idx, 1)
+    ElMessage.success('已从列表移除（后端未持久化）')
   }
 }
 
 onMounted(() => {
-  loadData()
+  bastionStore.loadBannedCommands()
 })
 </script>
-
-<style scoped>
-.banned-page {
-  padding: 20px;
-}
-
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
-
-.page-title {
-  margin: 0;
-  color: var(--text-primary);
-}
-</style>

@@ -1,17 +1,27 @@
 <template>
   <div class="page-wrapper">
-    <div class="page-header">
-      <h2 class="page-title">配置管理</h2>
-      <el-button type="primary" :loading="saving" @click="saveConfig">
-        保存配置
-      </el-button>
+    <div class="page-head">
+      <div class="page-head__text">
+        <h2 class="page-title">配置管理</h2>
+        <div class="page-subtitle">
+          <span>在线调整运行模式、限流与自动封禁</span>
+          <span class="source-chip">修改后立即生效</span>
+        </div>
+      </div>
+      <div class="page-head__actions">
+        <el-button type="primary" :loading="saving" @click="saveConfig">
+          保存配置
+        </el-button>
+      </div>
     </div>
 
-    <el-card shadow="hover">
-      <template #header>
-        <div class="card-title">基本设置</div>
-      </template>
-      <el-form :model="formData" label-width="140px" :disabled="!configLoaded">
+    <div class="panel">
+      <div class="panel__head">
+        <span class="panel__title">基本设置</span>
+        <span class="toolbar__count">修改后点击右上角「保存配置」生效</span>
+      </div>
+      <div class="panel__body">
+        <el-form :model="formData" label-width="160px" :disabled="!configLoaded" class="config-form">
         <el-form-item label="运行模式" required>
           <el-radio-group v-model="formData.mode">
             <el-radio value="block">拦截模式 (Block)</el-radio>
@@ -66,7 +76,8 @@
           </el-row>
         </el-form-item>
       </el-form>
-    </el-card>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -169,3 +180,9 @@ const saveConfig = async () => {
   }
 }
 </script>
+
+<style scoped>
+.config-form {
+  max-width: 860px;
+}
+</style>

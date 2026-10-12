@@ -1,29 +1,50 @@
 <template>
   <div class="page-wrapper">
-    <div class="page-header">
-      <h2 class="page-title">概览</h2>
-      <span class="help-text">
-        自动刷新: 每 {{ refreshInterval }} 秒
-        <el-text type="info" size="small" style="margin-left: 8px">(更新于 {{ lastUpdated }})</el-text>
-      </span>
+    <div class="page-head">
+      <div class="page-head__text">
+        <h2 class="page-title">概览</h2>
+        <div class="page-subtitle">
+          <span class="source-chip">自动刷新 · 每 {{ refreshInterval }} 秒</span>
+          <span>更新于 {{ lastUpdated || '—' }}</span>
+        </div>
+      </div>
+      <div class="page-head__actions">
+        <el-tag :type="currentMode === 'block' ? 'danger' : 'warning'" effect="light">
+          {{ currentMode === 'block' ? '拦截模式' : '检测模式' }}
+        </el-tag>
+      </div>
     </div>
 
-    <el-card class="stats-card" shadow="hover">
-      <el-row :gutter="20">
-        <el-col :span="6">
-          <el-statistic :value="totalRequests" label="总请求数" />
-        </el-col>
-        <el-col :span="6">
-          <el-statistic :value="blockedCount" label="拦截数" status="danger" />
-        </el-col>
-        <el-col :span="6">
-          <el-statistic :value="ruleMatched" label="规则命中" />
-        </el-col>
-        <el-col :span="6">
-          <el-statistic :value="rateLimited" label="限流数" status="warning" />
-        </el-col>
-      </el-row>
-    </el-card>
+    <div class="stat-grid">
+      <div class="stat-tile">
+        <div class="stat-tile__icon tone-brand"><el-icon><DataLine /></el-icon></div>
+        <div class="stat-tile__body">
+          <div class="stat-tile__value">{{ totalRequests }}</div>
+          <div class="stat-tile__label">总请求数</div>
+        </div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile__icon tone-danger"><el-icon><CircleCloseFilled /></el-icon></div>
+        <div class="stat-tile__body">
+          <div class="stat-tile__value">{{ blockedCount }}</div>
+          <div class="stat-tile__label">拦截数</div>
+        </div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile__icon tone-warning"><el-icon><Aim /></el-icon></div>
+        <div class="stat-tile__body">
+          <div class="stat-tile__value">{{ ruleMatched }}</div>
+          <div class="stat-tile__label">规则命中</div>
+        </div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile__icon tone-purple"><el-icon><Timer /></el-icon></div>
+        <div class="stat-tile__body">
+          <div class="stat-tile__value">{{ rateLimited }}</div>
+          <div class="stat-tile__label">限流数</div>
+        </div>
+      </div>
+    </div>
 
     <el-row :gutter="20" class="gap-card">
       <el-col :span="12">
@@ -73,38 +94,40 @@
 
     <el-row :gutter="20" class="gap-card">
       <el-col :span="12">
-        <el-card shadow="hover">
-          <template #header>
-            <div class="card-title">规则加载状态</div>
-          </template>
-          <el-row :gutter="10">
-            <el-col :span="12">
-              <el-tag type="success" style="margin-right: 10px">
-                总规则数: {{ totalRules }}
-              </el-tag>
-            </el-col>
-            <el-col :span="12">
-              <el-tag :type="currentMode === 'block' ? 'danger' : 'warning'">
-                {{ currentMode === 'block' ? '拦截模式' : '检测模式' }}
-              </el-tag>
-            </el-col>
-          </el-row>
-        </el-card>
+        <div class="panel">
+          <div class="panel__head"><span class="panel__title">规则加载状态</span></div>
+          <div class="panel__body">
+            <div class="kv-list">
+              <div class="kv-list__row">
+                <span class="kv-list__k">已加载规则</span>
+                <span class="kv-list__v">{{ totalRules }} 条</span>
+              </div>
+              <div class="kv-list__row">
+                <span class="kv-list__k">运行模式</span>
+                <el-tag :type="currentMode === 'block' ? 'danger' : 'warning'" effect="light">
+                  {{ currentMode === 'block' ? '拦截模式' : '检测模式' }}
+                </el-tag>
+              </div>
+            </div>
+          </div>
+        </div>
       </el-col>
       <el-col :span="12">
-        <el-card shadow="hover">
-          <template #header>
-            <div class="card-title">IP 列表状态</div>
-          </template>
-          <el-row :gutter="10">
-            <el-col :span="12">
-              <el-statistic :value="allowCount" label="白名单 IP 数" />
-            </el-col>
-            <el-col :span="12">
-              <el-statistic :value="denyCount" label="黑名单 IP 数" status="danger" />
-            </el-col>
-          </el-row>
-        </el-card>
+        <div class="panel">
+          <div class="panel__head"><span class="panel__title">IP 列表状态</span></div>
+          <div class="panel__body">
+            <div class="kv-list">
+              <div class="kv-list__row">
+                <span class="kv-list__k">白名单</span>
+                <span class="kv-list__v">{{ allowCount }} 个</span>
+              </div>
+              <div class="kv-list__row">
+                <span class="kv-list__k">黑名单</span>
+                <span class="kv-list__v kv-list__v--danger">{{ denyCount }} 个</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </el-col>
     </el-row>
   </div>
@@ -113,6 +136,7 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted, watch, computed, shallowRef } from 'vue'
 import { Line, Pie } from 'vue-chartjs'
+import { DataLine, CircleCloseFilled, Aim, Timer } from '@element-plus/icons-vue'
 import { useWafStore } from '@/stores/waf'
 
 const wafStore = useWafStore()

@@ -734,7 +734,7 @@ curl http://localhost:8081/api/healthz
 
 # 堡垒机健康检查
 curl http://localhost:8081/api/bastion/healthz
-# 返回: {"status":"ok","user_store":"mysql(users1)"}
+# 返回: {"status":"ok","user_store":"mysql(user1)"}
 ```
 
 ### Kubernetes 健康检查配置

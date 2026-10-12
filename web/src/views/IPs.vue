@@ -1,15 +1,22 @@
 <template>
   <div class="page-wrapper">
-    <div class="page-header">
-      <h2 class="page-title">IP 列表管理</h2>
-      <div class="action-group">
+    <div class="page-head">
+      <div class="page-head__text">
+        <h2 class="page-title">IP 列表管理</h2>
+        <div class="page-subtitle">
+          <span class="source-chip is-live">白名单 {{ wafStore.allowList.length }}</span>
+          <span class="source-chip">黑名单 {{ wafStore.denyList.length }}</span>
+          <span>白名单直接放行，黑名单直接拒绝</span>
+        </div>
+      </div>
+      <div class="page-head__actions">
         <el-button type="success" @click="showAddIp('allow')">
           <template #icon>
             <Plus />
           </template>
           添加白名单
         </el-button>
-        <el-button type="danger" @click="showAddIp('deny')">
+        <el-button type="danger" plain @click="showAddIp('deny')">
           <template #icon>
             <Close />
           </template>
@@ -18,47 +25,61 @@
       </div>
     </div>
 
-    <el-tabs v-model="activeTab" @change="loadLists">
-      <el-tab-pane name="allow" label="白名单">
-        <div class="ips-section">
-          <div class="ips-count">当前 {{ wafStore.allowList.length }} 个 IP/CIDR</div>
-          <el-table :data="wafStore.allowList" class="w-full" height="300">
-            <el-table-column label="IP/CIDR">
-              <template #default="scope">
-                {{ scope.row }}
+    <div class="panel">
+      <el-tabs v-model="activeTab" @change="loadLists" class="ips-tabs">
+        <el-tab-pane name="allow" label="白名单">
+          <div class="ips-section">
+            <el-table :data="wafStore.allowList" class="w-full" height="320">
+              <el-table-column label="IP / CIDR">
+                <template #default="scope">
+                  <span class="mono">{{ scope.row }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="120" fixed="right">
+                <template #default="scope">
+                  <el-button size="small" type="danger" plain @click="removeFromAllow(scope.row)">
+                    删除
+                  </el-button>
+                </template>
+              </el-table-column>
+              <template #empty>
+                <div class="empty-state">
+                  <div class="empty-state__icon">✅</div>
+                  <div class="empty-state__title">白名单为空</div>
+                  <div class="empty-state__hint">点击右上角「添加白名单」加入可信 IP 或网段</div>
+                </div>
               </template>
-            </el-table-column>
-            <el-table-column label="操作" width="120" fixed="right">
-              <template #default="scope">
-                <el-button size="small" type="danger" @click="removeFromAllow(scope.row)">
-                  删除
-                </el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-        </div>
-      </el-tab-pane>
+            </el-table>
+          </div>
+        </el-tab-pane>
 
-      <el-tab-pane name="deny" label="黑名单">
-        <div class="ips-section">
-          <div class="ips-count">当前 {{ wafStore.denyList.length }} 个 IP/CIDR</div>
-          <el-table :data="wafStore.denyList" style="width: 100%" height="300">
-            <el-table-column label="IP/CIDR">
-              <template #default="scope">
-                {{ scope.row }}
+        <el-tab-pane name="deny" label="黑名单">
+          <div class="ips-section">
+            <el-table :data="wafStore.denyList" class="w-full" height="320">
+              <el-table-column label="IP / CIDR">
+                <template #default="scope">
+                  <span class="mono">{{ scope.row }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="120" fixed="right">
+                <template #default="scope">
+                  <el-button size="small" type="danger" plain @click="removeFromDeny(scope.row)">
+                    删除
+                  </el-button>
+                </template>
+              </el-table-column>
+              <template #empty>
+                <div class="empty-state">
+                  <div class="empty-state__icon">🚫</div>
+                  <div class="empty-state__title">黑名单为空</div>
+                  <div class="empty-state__hint">点击右上角「添加黑名单」封禁恶意 IP 或网段</div>
+                </div>
               </template>
-            </el-table-column>
-            <el-table-column label="操作" width="120" fixed="right">
-              <template #default="scope">
-                <el-button size="small" type="danger" @click="removeFromDeny(scope.row)">
-                  删除
-                </el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-        </div>
-      </el-tab-pane>
-    </el-tabs>
+            </el-table>
+          </div>
+        </el-tab-pane>
+      </el-tabs>
+    </div>
 
     <!-- 添加 IP 弹窗 -->
     <el-dialog :title="dialogTitle" v-model="showDialog" width="400px">
@@ -170,15 +191,11 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.ips-section {
-  padding: 10px;
+.ips-tabs {
+  padding: 4px 18px 12px;
 }
 
-.ips-count {
-  font-size: 14px;
-  color: var(--text-secondary);
-  margin-bottom: 10px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border-color);
+.ips-section {
+  padding-top: 4px;
 }
 </style>

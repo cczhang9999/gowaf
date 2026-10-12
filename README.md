@@ -162,26 +162,37 @@ pnpm dev
 | `/api/bastion/config` | GET | 获取堰垒机配置 |
 | `/api/bastion/config` | PUT | 更新堰垒机配置 |
 
-### 用户持久化(users1 表)
+### 用户持久化(user1 表)
 
-堡垒机用户默认只存在内存里,进程重启即丢。加上 `-mysql-dsn` 后,
-`/api/bastion/users` 的增删改查直接落到 MySQL 的 **`users1`** 表:
+堡垒机用户默认只存在内存里,进程重启即丢。加上 `-mysql-dsn`(或用 `-config config.yaml`,
+仓库根目录的 `config.yaml` 已预置好 DSN)后,**Web 控制台「用户管理」页的列表与增删改
+全部落到 MySQL `myapp` 库的 `user1` 表**:
 
 ```bash
-# 独立堡垒机
+# 方式 1:使用仓库自带的 config.yaml(已指向 myapp 库)
+./gowaf -config config.yaml
+
+# 方式 2:独立堡垒机
 ./bastion -api-listen :8081 \
   -mysql-dsn 'user:pass@tcp(127.0.0.1:3306)/myapp?charset=utf8mb4&parseTime=True&loc=Local'
 
-# WAF + 堡垒机管理面(同一个 API 地址)
+# 方式 3:WAF + 堡垒机管理面(同一个 API 地址)
 ./gowaf -listen :8080 -upstream http://127.0.0.1:9000 -api-addr :8081 \
   -mysql-dsn 'user:pass@tcp(127.0.0.1:3306)/myapp?charset=utf8mb4&parseTime=True&loc=Local'
 ```
 
-建表脚本:`sql/init_users.sql`(启动时 GORM `AutoMigrate` 也会自动建表)。
-接口里的 `{id}` 既可以是 `username`,也可以是 `users1.id`;`GET /api/bastion/healthz`
-返回的 `user_store` 会显示当前是 `mysql(users1)` 还是 `memory`。
+| 接口 | 说明 |
+|---|---|
+| `GET /api/bastion/users` | 列出 `user1` 全部行(控制台用户列表用这个) |
+| `POST /api/bastion/users` | 新增一行(bcrypt 加密后的密码) |
+| `GET/PUT/DELETE /api/bastion/users/{id}` | `{id}` 可用 `username` 或 `user1.id` |
+| `/api/bastion/users1` | 与 `/api/bastion/users` 完全等价,操作同一张 `user1` 表 |
 
-| users1 列 | 接口字段 | 说明 |
+建表脚本:`sql/init_user1.sql`(启动时也会自动建表,已存在则不动)。
+`GET /api/bastion/users` 的响应里带 `store` / `table` 字段,`GET /api/bastion/healthz`
+的 `user_store` 会显示当前是 `mysql(user1)` 还是 `memory`。
+
+| user1 列 | 接口字段 | 说明 |
 |---|---|---|
 | `id` | `id` | 主键,`/users/{id}` 可直接用 |
 | `username` | `username` | 唯一,`/users/{username}` 也可用 |
@@ -192,8 +203,8 @@ pnpm dev
 | `comment` | `comment` | 备注 |
 | `created_at` / `updated_at` | `created_at` | 时间戳 |
 
-> 表名固定是 `users1`。同一个库里可能还有业务方的 `users`(`id/name/email`),
-> 两者互不相干,不要混用。
+> 控制台用户管理页固定操作 `user1` 表。同一个库里还有 `users1` 表(SSH 登录认证用)
+> 和业务方的 `users`(`id/name/email`),三者互不相干,不要混用。
 
 ### 启动 SSH 堰垒机
 
