@@ -2,6 +2,7 @@
   <el-container style="height: 100vh">
     <el-aside width="220px" class="nav-aside">
       <div class="logo">
+        <span class="logo__mark">W</span>
         <h3>GoWAF Admin</h3>
       </div>
       <el-menu
@@ -32,9 +33,9 @@
         </el-menu-item>
 
         <el-divider borderless class="section-divider" />
-        <div class="menu-section-label">堰垒机</div>
+        <div class="menu-section-label">堡垒机</div>
 
-        <el-menu-item index="/bastion" title="堰垒机概览">
+        <el-menu-item index="/bastion" title="堡垒机概览">
           <template #icon><Connection /></template>
           <span>概览</span>
         </el-menu-item>
@@ -193,11 +194,36 @@ onMounted(() => {
   background-color: var(--background-sidebar);
 }
 
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 56px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.logo__mark {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--brand-grad);
+}
+
 .logo h3 {
-  font-weight: normal;
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.2px;
   color: var(--sidebar-brand-text);
-  padding: 15px;
   margin: 0;
+  white-space: nowrap;
 }
 
 .page-header-bar {

@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"gowaf/internal/middleware"
+	"gowaf/models"
 )
 
 // AdminAPI provides a REST API for managing the bastion host.
@@ -88,13 +89,30 @@ func (a *AdminAPI) handleUsers() http.HandlerFunc {
 }
 
 func (a *AdminAPI) listUsers(w http.ResponseWriter, r *http.Request) {
-	users := a.Server.ListUsers1()
-	a.json(w, http.StatusOK, usersResponse{Users: users, Count: len(users)})
+	users, err := a.Server.ListUsers1WithErr()
+	if err != nil {
+		// 数据库不可用时不要把「查询失败」伪装成「没有用户」。
+		if a.Log != nil {
+			a.Log.Error("list users from user1 failed", "err", err)
+		}
+		writeJSONErr(w, http.StatusBadGateway, "查询用户列表失败（"+models.User1TableName+" 表）："+err.Error())
+		return
+	}
+	a.json(w, http.StatusOK, usersResponse{
+		Users: users,
+		Count: len(users),
+		Store: a.Server.UserStoreName(),
+		Table: models.User1TableName,
+	})
 }
 
 type usersResponse struct {
 	Users []*User `json:"users"`
 	Count int     `json:"count"`
+	// Store reports the backing user store, e.g. "mysql(user1)" or "memory".
+	Store string `json:"store,omitempty"`
+	// Table is the physical table the list was read from (user1).
+	Table string `json:"table,omitempty"`
 }
 
 // UserCreateRequest is the request body for creating a user.
@@ -829,7 +847,7 @@ func (a *AdminAPI) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"total_events":    len(events),
 		"by_action":       counts,
 		"total_assets":    len(a.Server.AssetStore().All()),
-		"total_users":     len(a.Server.ListUsers()),
+		"total_users":     len(a.Server.ListUsers1()),
 		"user_store":      a.Server.UserStoreName(),
 	})
 }

@@ -106,7 +106,12 @@ export const api = {
   bastionPrefix: '/bastion',
 
   // Users
-  bastionGetUsers(): Promise<{ users: BastionUser[]; count: number }> {
+  bastionGetUsers(): Promise<{
+    users: BastionUser[]
+    count: number
+    store?: string
+    table?: string
+  }> {
     return instance.get(`${this.bastionPrefix}/users`)
   },
 

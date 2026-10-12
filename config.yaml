@@ -1,0 +1,125 @@
+# GoWAF 运行配置
+#
+# 用法:
+#   ./gowaf -config config.yaml
+#
+# CLI flags 优先级高于本文件。下面的 database.mysql_dsn 已指向 myapp 库,
+# 堡垒机「用户管理」页的列表与增删改都会落到 myapp.user1 表。
+#
+# 注意:本文件含数据库口令,生产环境请替换为独立账号并收紧权限。
+
+# ==================== WAF 基础配置 ====================
+waf:
+  # block = 命中即拦截; detect = 仅记录日志(新规则灰度用)
+  mode: "block"
+  max_body: 1048576        # 最大检查请求体 1MB
+  trust_xff: false         # 仅当前面确有可信代理时开启
+
+# ==================== 限流配置 ====================
+rate_limit:
+  enabled: true
+  rps: 20.0                # 每 IP 每秒请求数
+  burst: 40                # 令牌桶突发容量
+  strategy: "per_ip"       # per_ip / per_path / per_user
+  path_whitelist:
+    - "/api/healthz"
+    - "/api/metrics"
+    - "/__waf/metrics"
+  path_rules:
+    - path: "/api/*"
+      rps: 10.0
+      burst: 20
+  auto_ban:
+    enabled: true
+    strikes: 5
+    window: "1m"
+    duration: "10m"
+
+# ==================== IP 管理 ====================
+ip:
+  allow:
+    - "127.0.0.1"
+    - "::1"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+  deny: []
+
+# ==================== 上游源站 ====================
+upstream:
+  url: "http://127.0.0.1:9000"
+  dial_timeout: 3
+  idle_timeout: 90
+  max_idle_conns: 100
+
+# ==================== 监听配置 ====================
+server:
+  listen: ":8080"          # WAF 反向代理端口
+  api_addr: ":8081"        # 管理 API 端口(前端 dev 代理指向这里)
+  read_header_timeout: "5s"
+  read_timeout: "15s"
+  write_timeout: "60s"
+  idle_timeout: "60s"
+  max_header_bytes: 65536
+
+# ==================== 规则配置 ====================
+rules:
+  path: ""                 # 自定义规则文件,支持 SIGHUP 热加载
+  builtin_rules:
+    sql_injection: true
+    xss: true
+    path_traversal: true
+    command_injection: true
+    log4shell: true
+    scanner_detection: true
+
+# ==================== SSH 堡垒机 ====================
+bastion:
+  # 是否监听 SSH 端口;false 时管理 API(用户/资产/审计)仍可用
+  enabled: false
+  ssh_listen: ":2222"
+  host_key_path: "ssh_host_key"
+  recording_dir: "recordings"
+  audit_log_path: "audit.log"
+  default_user: "root"
+  default_port: 22
+  max_sessions: 100
+  session_idle_timeout: "30m"
+  banner: "=== GoWAF Bastion Host ===\nAuthorized access only.\n"
+  admin_user: "admin"
+  admin_pass: "ChangeMe!2024"   # 生产环境务必修改
+
+# ==================== 数据库 ====================
+database:
+  # 堡垒机用户表(user1 / users1)所在的 MySQL。
+  # 用户管理页 GET/POST/PUT/DELETE /api/bastion/users 直接读写 myapp.user1
+  mysql_dsn: "hobart:123456@tcp(78.154.103.23:9257)/myapp?charset=utf8mb4&parseTime=True&loc=Local"
+  sqlite_path: ""
+
+# ==================== 日志 ====================
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
+  file_path: ""
+
+# ==================== 安全加固 ====================
+security:
+  cors:
+    enabled: false
+    allowed_origins:
+      - "http://localhost:3000"
+    allowed_methods:
+      - "GET"
+      - "POST"
+      - "PUT"
+      - "DELETE"
+    allowed_headers:
+      - "Content-Type"
+      - "Authorization"
+  # token 为空 = 不启用认证(本地开发方便);生产请填写 token
+  api_auth:
+    enabled: true
+    type: "token"
+    token: ""
+  hide_version: true

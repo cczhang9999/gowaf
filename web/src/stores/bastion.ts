@@ -7,6 +7,7 @@ import { api } from '@/api'
 export type UserRole = 'admin' | 'user' | 'auditor'
 
 export interface BastionUser {
+  id?: number
   username: string
   public_key: string
   role: UserRole
@@ -116,6 +117,8 @@ export interface BastionHealthResponse {
   status: string
   ssh_listen: string
   active_sessions: number
+  uptime?: string
+  user_store?: string
 }
 
 // --- Store ---
@@ -131,6 +134,13 @@ export const useBastionStore = defineStore('bastion', () => {
   const health = ref<Partial<BastionHealthResponse>>({ status: 'unknown' })
   const loading = ref(false)
 
+  // 用户列表的数据来源,由后端在 GET /api/bastion/users 的响应里返回,
+  // 例如 { store: 'mysql(user1)', table: 'user1' }。用于页面展示「数据来源」。
+  const userStore = ref('')
+  const userTable = ref('')
+  // 加载用户列表失败时的错误信息(例如数据库连接超时),供页面提示。
+  const usersError = ref('')
+
   // Whether the bastion module is enabled on the backend.
   // null = unknown (health check not yet completed), true/false = known.
   const bastionEnabled = ref<boolean | null>(null)
@@ -142,6 +152,9 @@ export const useBastionStore = defineStore('bastion', () => {
   const totalSessions = computed(() => sessions.value.length)
   const userCount = computed(() => users.value.length)
   const assetCount = computed(() => assets.value.length)
+  const adminCount = computed(() => users.value.filter(u => u.role === 'admin').length)
+  const normalUserCount = computed(() => users.value.filter(u => u.role === 'user').length)
+  const auditorCount = computed(() => users.value.filter(u => u.role === 'auditor').length)
 
   /**
    * Detect whether an error is a 503 Service Unavailable response from the
@@ -184,11 +197,18 @@ export const useBastionStore = defineStore('bastion', () => {
   const loadUsers = async () => {
     try {
       loading.value = true
+      usersError.value = ''
       const body = payload(await api.bastionGetUsers())
       users.value = Array.isArray(body?.users) ? body.users : []
+      if (typeof body?.store === 'string') userStore.value = body.store
+      if (typeof body?.table === 'string') userTable.value = body.table
       markEnabled()
-    } catch (error) {
+    } catch (error: any) {
       if (!isBastionDisabled(error)) {
+        usersError.value =
+          error?.response?.data?.error ||
+          error?.message ||
+          '加载用户列表失败'
         console.error('Failed to load users:', error)
       }
     } finally {
@@ -425,6 +445,9 @@ export const useBastionStore = defineStore('bastion', () => {
     loading,
     bastionEnabled,
     bastionError,
+    userStore,
+    userTable,
+    usersError,
 
     // Computed
     activeSessions,
@@ -432,6 +455,9 @@ export const useBastionStore = defineStore('bastion', () => {
     totalSessions,
     userCount,
     assetCount,
+    adminCount,
+    normalUserCount,
+    auditorCount,
 
     // Users
     loadUsers,

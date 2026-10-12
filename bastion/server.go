@@ -19,6 +19,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"gorm.io/gorm"
+
+	"gowaf/models"
 )
 
 // SessionEvent is emitted for every notable session lifecycle event.
@@ -277,10 +279,17 @@ func (s *SSHServer) GetUserByID(id uint) (*User, bool) {
 	return s.authStore.GetUserByID(id)
 }
 
-// UserStoreName reports where users are persisted, e.g. "mysql(users1)".
+// UserStoreName reports where the user-management API persists users.
+//
+// /api/bastion/users (and /users1) read and write the user1 table, so that is
+// the store reported here. Earlier this returned "mysql(users1)", which made
+// the console claim a table it never touched.
 func (s *SSHServer) UserStoreName() string {
+	if s.dbAuthStore1 != nil {
+		return "mysql(" + models.User1TableName + ")"
+	}
 	if s.dbAuthStore != nil {
-		return "mysql(users1)"
+		return "mysql(" + models.UserTableName + ")"
 	}
 	return "memory"
 }
@@ -358,6 +367,15 @@ func (s *SSHServer) ListUsers1() []*User {
 		return s.dbAuthStore1.ListUsers1()
 	}
 	return s.authStore.ListUsers()
+}
+
+// ListUsers1WithErr 与 ListUsers1 相同,但把数据库错误返回给调用方,
+// 便于管理 API 在数据库不可用时返回 5xx 而不是空列表。
+func (s *SSHServer) ListUsers1WithErr() ([]*User, error) {
+	if s.dbAuthStore1 != nil {
+		return s.dbAuthStore1.ListUsers1WithErr()
+	}
+	return s.authStore.ListUsers(), nil
 }
 
 // HasUser1 checks if a user exists in the user1 table.
