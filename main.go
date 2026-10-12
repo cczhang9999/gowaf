@@ -45,7 +45,8 @@ var (
 	apiToken = flag.String("api-token", "", "API 服务器身份认证 Token(也可通过 GOWAF_API_TOKEN 环境变量设置)")
 
 	// 配置文件
-	configPath = flag.String("config", "", "YAML 配置文件路径(CLI 参数优先于配置文件)")
+	// 未显式传 -config 时,main() 会自动尝试加载当前目录下的 config.yaml。
+	configPath = flag.String("config", "", "YAML 配置文件路径(留空则自动尝试加载当前目录的 config.yaml,CLI 参数优先于配置文件)")
 
 	// 堡垒机(SSH)模式:当 -ssh 启用时,同时运行 SSH 堡垒机
 	sshEnable      = flag.Bool("ssh", false, "启用 SSH 堰垒机模式(在 WAF 之外同时监听 SSH)")
@@ -304,17 +305,34 @@ func buildServer(listen string, handler http.Handler) *http.Server {
 func main() {
 	flag.Parse()
 
-	// 加载配置文件(如果指定)
+	// 加载配置文件。
+	// 优先级:
+	//   1. 显式 -config <path> → 加载该文件(解析失败则回落到纯 CLI 参数,并打印告警)
+	//   2. 未指定 -config     → 自动尝试当前目录的 config.yaml;
+	//                          存在则加载(解析失败回落 CLI),不存在则使用纯 CLI 默认值(不报错)。
+	// 这样 `./gowaf` 即可直接读取仓库里的 config.yaml,无需手动传 -config。
 	var yamlCfg *config.Config
-	if *configPath != "" {
-		var err error
-		yamlCfg, err = config.Load(*configPath)
+	loadPath := *configPath
+	if loadPath == "" {
+		loadPath = "config.yaml"
+	}
+	if _, statErr := os.Stat(loadPath); statErr == nil {
+		cfg, err := config.Load(loadPath)
 		if err != nil {
-			// 尝试从 YAML 解析失败后,仍然允许 CLI 参数工作(生产环境需要明确错误)
+			// 解析失败:不退出,回落到 CLI 参数(保留原行为)
 			log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-			log.Error("failed to load config file, falling back to CLI flags", "path", *configPath, "err", err)
+			log.Error("failed to load config file, falling back to CLI flags", "path", loadPath, "err", err)
 			yamlCfg = nil
+		} else {
+			yamlCfg = cfg
+			log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+			log.Info("loaded config file", "path", loadPath)
 		}
+	} else if *configPath != "" {
+		// 显式指定的文件不存在:这是配置错误,直接退出
+		log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+		log.Error("config file not found", "path", loadPath)
+		os.Exit(1)
 	}
 
 	log := newLogger(yamlCfg)
