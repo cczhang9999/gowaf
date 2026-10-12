@@ -311,10 +311,10 @@ const dialogTitle = computed(() => (isEdit.value ? '编辑用户' : '添加用�
 const hasFilters = computed(() => !!(keyword.value || roleFilter.value))
 const isDbBacked = computed(() => bastionStore.userStore.startsWith('mysql'))
 
-// 展示用数据来源:后端返回 store=mysql(user1) 时,渲染成 MySQL · myapp.user1
+// 展示用数据来源:后端返回 store=mysql(users1) 时,渲染成 MySQL · myapp.users1
 const sourceLabel = computed(() => {
   const store = bastionStore.userStore
-  const table = bastionStore.userTable || 'user1'
+  const table = bastionStore.userTable || 'users1'
   if (!store) return '未知'
   if (store.startsWith('mysql')) return `MySQL · myapp.${table}`
   return store

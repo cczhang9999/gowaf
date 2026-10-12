@@ -1,17 +1,17 @@
--- 堡垒机用户表 user1
+-- 堡垒机用户表 user1(历史遗留表)
 --
--- /api/bastion/users 以及 /api/bastion/users1 读写的就是这张表:
---   GET    /api/bastion/users        列出 user1 全部行
---   POST   /api/bastion/users        插入一行(bcrypt 后的密码)
---   GET    /api/bastion/users/{id}   按 username 或 id 查
---   PUT    /api/bastion/users/{id}   更新行
---   DELETE /api/bastion/users/{id}   删除行
---   (GET/POST/PUT/DELETE /api/bastion/users1 与上相同,操作同一张 user1 表)
+-- 注意:控制台「用户管理」页和 SSH 登录认证现在都用 users1 表(见 sql/init_users.sql)。
+-- 这张 user1 表只被旧接口 /api/bastion/users1 使用:
+--   GET    /api/bastion/users1        列出 user1 全部行
+--   POST   /api/bastion/users1        插入一行(bcrypt 后的密码)
+--   GET    /api/bastion/users1/{id}   按 username 或 id 查
+--   PUT    /api/bastion/users1/{id}   更新行
+--   DELETE /api/bastion/users1/{id}   删除行
 --
 -- 用法(库名与 gowaf -mysql-dsn 的示例保持一致,按需替换):
 --   mysql -h <host> -P <port> -u <user> -p < sql/init_user1.sql
 --
--- 表名是 user1,不是 users:同一个库里的用户表可以有 users1 和 user1 两个表，
+-- 表名是 user1,不是 users:同一个库里可以有 users1 和 user1 两张表,
 -- 分别用于不同的用户来源或业务场景。
 
 CREATE DATABASE IF NOT EXISTS myapp CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

@@ -281,25 +281,31 @@ func (s *SSHServer) GetUserByID(id uint) (*User, bool) {
 
 // UserStoreName reports where the user-management API persists users.
 //
-// /api/bastion/users (and /users1) read and write the user1 table, so that is
-// the store reported here. Earlier this returned "mysql(users1)", which made
-// the console claim a table it never touched.
+// /api/bastion/users (the console 用户管理 page) reads and writes the users1
+// table — the same table SSH authentication uses — so that is the store
+// reported here. The legacy /users1 endpoints still target the user1 table.
 func (s *SSHServer) UserStoreName() string {
-	if s.dbAuthStore1 != nil {
-		return "mysql(" + models.User1TableName + ")"
-	}
 	if s.dbAuthStore != nil {
 		return "mysql(" + models.UserTableName + ")"
 	}
 	return "memory"
 }
 
-// ListUsers returns all users.
+// ListUsers returns all users from the users1 table (or memory without a DSN).
 func (s *SSHServer) ListUsers() []*User {
 	if s.dbAuthStore != nil {
 		return s.dbAuthStore.ListUsers()
 	}
 	return s.authStore.ListUsers()
+}
+
+// ListUsersWithErr 与 ListUsers 相同,但把数据库错误透传给调用方,
+// 便于管理 API 在数据库不可用时返回 5xx 而不是空列表。
+func (s *SSHServer) ListUsersWithErr() ([]*User, error) {
+	if s.dbAuthStore != nil {
+		return s.dbAuthStore.ListUsersWithErr()
+	}
+	return s.authStore.ListUsers(), nil
 }
 
 // HasUser checks if a user exists.

@@ -96,11 +96,11 @@ func main() {
 	}
 
 	// Optional: Create MySQL database connection if DSN provided.
-	// Users are then persisted in the users1 and user1 tables instead of memory.
+	// Users are then persisted in the users1 table instead of memory.
 	// Without a DSN, /api/bastion/users still returns 201 (Created) but data
 	// is held only in memory — it is NOT written to any table, and no SQL
 	// logs are emitted. This is the #1 cause of "POST /api/bastion/users
-	// returns 201 but user1 is empty" reports.
+	// returns 201 but users1 is empty" reports.
 	var db *gorm.DB
 	if *mysqlDSN != "" {
 		log.Info("connecting to MySQL database")

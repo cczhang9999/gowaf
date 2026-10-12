@@ -4,7 +4,7 @@
 #   ./gowaf -config config.yaml
 #
 # CLI flags 优先级高于本文件。下面的 database.mysql_dsn 已指向 myapp 库,
-# 堡垒机「用户管理」页的列表与增删改都会落到 myapp.user1 表。
+# 堡垒机「用户管理」页的列表与增删改都会落到 myapp.users1 表(SSH 登录认证用的同一张表)。
 #
 # 注意:本文件含数据库口令,生产环境请替换为独立账号并收紧权限。
 
@@ -91,8 +91,8 @@ bastion:
 
 # ==================== 数据库 ====================
 database:
-  # 堡垒机用户表(user1 / users1)所在的 MySQL。
-  # 用户管理页 GET/POST/PUT/DELETE /api/bastion/users 直接读写 myapp.user1
+  # 堡垒机用户表(users1)所在的 MySQL。
+  # 用户管理页 GET/POST/PUT/DELETE /api/bastion/users 直接读写 myapp.users1
   mysql_dsn: "hobart:123456@tcp(78.154.103.23:9257)/myapp?charset=utf8mb4&parseTime=True&loc=Local"
   sqlite_path: ""
 

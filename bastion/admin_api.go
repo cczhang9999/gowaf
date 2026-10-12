@@ -89,29 +89,29 @@ func (a *AdminAPI) handleUsers() http.HandlerFunc {
 }
 
 func (a *AdminAPI) listUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := a.Server.ListUsers1WithErr()
+	users, err := a.Server.ListUsersWithErr()
 	if err != nil {
 		// 数据库不可用时不要把「查询失败」伪装成「没有用户」。
 		if a.Log != nil {
-			a.Log.Error("list users from user1 failed", "err", err)
+			a.Log.Error("list users from users1 failed", "err", err)
 		}
-		writeJSONErr(w, http.StatusBadGateway, "查询用户列表失败（"+models.User1TableName+" 表）："+err.Error())
+		writeJSONErr(w, http.StatusBadGateway, "查询用户列表失败（"+models.UserTableName+" 表）："+err.Error())
 		return
 	}
 	a.json(w, http.StatusOK, usersResponse{
 		Users: users,
 		Count: len(users),
 		Store: a.Server.UserStoreName(),
-		Table: models.User1TableName,
+		Table: models.UserTableName,
 	})
 }
 
 type usersResponse struct {
 	Users []*User `json:"users"`
 	Count int     `json:"count"`
-	// Store reports the backing user store, e.g. "mysql(user1)" or "memory".
+	// Store reports the backing user store, e.g. "mysql(users1)" or "memory".
 	Store string `json:"store,omitempty"`
-	// Table is the physical table the list was read from (user1).
+	// Table is the physical table the list was read from (users1).
 	Table string `json:"table,omitempty"`
 }
 
@@ -166,7 +166,7 @@ func (a *AdminAPI) createUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid role; must be admin, user or auditor", http.StatusBadRequest)
 		return
 	}
-	if a.Server.HasUser1(req.Username) {
+	if a.Server.HasUser(req.Username) {
 		http.Error(w, "user already exists", http.StatusConflict)
 		return
 	}
@@ -180,7 +180,7 @@ func (a *AdminAPI) createUser(w http.ResponseWriter, r *http.Request) {
 		Comment:       req.Comment,
 		CreatedAt:     time.Now(),
 	}
-	if err := a.Server.Register1(u); err != nil {
+	if err := a.Server.AddUser(u); err != nil {
 		http.Error(w, "create user: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -216,16 +216,16 @@ func (a *AdminAPI) getUser(w http.ResponseWriter, r *http.Request, id string) {
 	a.json(w, http.StatusOK, u)
 }
 
-// resolveUser looks a user up by username first, then by the numeric user1
+// resolveUser looks a user up by username first, then by the numeric users1
 // primary key, so /api/bastion/users/{id} accepts both forms.
-// It reads from the user1 table to stay consistent with createUser (which
-// persists additions via Register1 → user1 table).
+// It reads from the users1 table to stay consistent with createUser (which
+// persists additions via AddUser → users1 table).
 func (a *AdminAPI) resolveUser(idOrName string) (*User, bool) {
-	if u, ok := a.Server.GetUser1(idOrName); ok {
+	if u, ok := a.Server.GetUser(idOrName); ok {
 		return u, true
 	}
 	if n, err := strconv.ParseUint(idOrName, 10, 64); err == nil {
-		return a.Server.GetUser1ByID(uint(n))
+		return a.Server.GetUserByID(uint(n))
 	}
 	return nil, false
 }
@@ -309,7 +309,7 @@ func (a *AdminAPI) updateUser(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	// Save updated user
-	if err := a.Server.UpdateUser1(actual); err != nil {
+	if err := a.Server.UpdateUser(actual); err != nil {
 		http.Error(w, "update user: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -322,7 +322,7 @@ func (a *AdminAPI) deleteUser(w http.ResponseWriter, r *http.Request, id string)
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
-	if err := a.Server.Unregister1(actual.Username); err != nil {
+	if err := a.Server.RemoveUser(actual.Username); err != nil {
 		http.Error(w, "delete user: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -847,7 +847,7 @@ func (a *AdminAPI) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"total_events":    len(events),
 		"by_action":       counts,
 		"total_assets":    len(a.Server.AssetStore().All()),
-		"total_users":     len(a.Server.ListUsers1()),
+		"total_users":     len(a.Server.ListUsers()),
 		"user_store":      a.Server.UserStoreName(),
 	})
 }
