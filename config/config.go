@@ -146,6 +146,7 @@ type CORSConfig struct {
 type APIAuthConfig struct {
 	Enabled bool   `yaml:"enabled"` // 是否启用
 	Type    string `yaml:"type"`    // none / basic / token
+	Token   string `yaml:"token"`   // token 认证密钥 (type=token 时必填)
 }
 
 // Load 加载配置文件

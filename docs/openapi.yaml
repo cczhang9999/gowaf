@@ -28,6 +28,10 @@ tags:
   - name: Bastion
     description: SSH 堡垒机管理
 
+# 所有接口默认需要 Bearer Token 认证
+security:
+  - BearerAuth: []
+
 paths:
   /api/rules:
     get:
@@ -306,14 +310,37 @@ paths:
       tags:
         - Health
       summary: WAF 健康检查
+      description: 检查上游服务器连通性(如果配置了上游)。豁免 API Token 认证。
+      security: []
       responses:
         '200':
           description: 服务正常
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-                example: OK
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  upstream:
+                    type: string
+                    example: reachable
+        '503':
+          description: 上游不可达
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: degraded
+                  upstream:
+                    type: string
+                    example: unreachable
+                  upstream_error:
+                    type: string
 
   /api/bastion/healthz:
     get:
@@ -458,11 +485,23 @@ paths:
           schema:
             type: integer
             default: 100
+          description: 返回的最大事件数
         - name: offset
           in: query
           schema:
             type: integer
             default: 0
+          description: 跳过的事件数
+        - name: user
+          in: query
+          schema:
+            type: string
+          description: 按用户名过滤
+        - name: session
+          in: query
+          schema:
+            type: string
+          description: 按会话 ID 过滤
       responses:
         '200':
           description: 成功
@@ -576,6 +615,14 @@ paths:
           description: 会话不存在
 
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        API Token 认证。通过 `-api-token` 参数或 `GOWAF_API_TOKEN` 环境变量或
+        配置文件的 `security.api_auth.token` 设置。
+        健康检查(`/api/healthz`)豁免认证。
   schemas:
     Rule:
       type: object

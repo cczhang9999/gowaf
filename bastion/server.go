@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"net"
@@ -12,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -38,7 +41,7 @@ type SessionEvent struct {
 //   - graceful shutdown via context cancellation
 //   - per-connection goroutines with proper cleanup
 type SSHServer struct {
-	config *BastionConfig
+	config atomic.Pointer[BastionConfig]
 	logger *slog.Logger
 
 	sshConfig *ssh.ServerConfig
@@ -58,11 +61,17 @@ type SSHServer struct {
 	sessionsMu sync.Mutex
 	sessions   map[string]*SessionContext
 
+	// activeConns tracks concurrent SSH connections for MaxSessions enforcement
+	activeConns atomic.Int64
+
 	// Event channel for async audit logging
 	events chan SessionEvent
 
 	// Host key signer
 	signer ssh.Signer
+
+	// startTime for uptime reporting (set once at construction, before any goroutines)
+	startTime time.Time
 }
 
 // SessionContext holds per-session state during an SSH connection.
@@ -108,7 +117,6 @@ func NewSSHServerWithDB(cfg *BastionConfig, log *slog.Logger, db *gorm.DB) (*SSH
 	auditStore := NewAuditStore(10000)
 
 	srv := &SSHServer{
-		config:       cfg,
 		logger:       log,
 		authStore:    authStore,
 		assetStore:   assetStore,
@@ -118,6 +126,8 @@ func NewSSHServerWithDB(cfg *BastionConfig, log *slog.Logger, db *gorm.DB) (*SSH
 		sessions:     make(map[string]*SessionContext),
 		events:       make(chan SessionEvent, 1000),
 	}
+	srv.config.Store(cfg)
+	srv.startTime = time.Now()
 
 	// Initialize audit logger
 	auditLogger, err := NewAuditLogger(cfg.AuditLogPath)
@@ -158,7 +168,17 @@ func NewSSHServerWithDB(cfg *BastionConfig, log *slog.Logger, db *gorm.DB) (*SSH
 
 // SetConfig atomically updates the server configuration.
 func (s *SSHServer) SetConfig(cfg *BastionConfig) {
-	s.config = cfg
+	s.config.Store(cfg)
+}
+
+// getConfig atomically reads the current configuration.
+func (s *SSHServer) getConfig() *BastionConfig {
+	return s.config.Load()
+}
+
+// StartTime returns when the server was started.
+func (s *SSHServer) StartTime() time.Time {
+	return s.startTime
 }
 
 // SetAssets atomically updates the backend asset list.
@@ -374,21 +394,27 @@ func (s *SSHServer) RecordingIndex() *RecordingIndex {
 // Start starts the SSH server and blocks until the listener errors or context is cancelled.
 func (s *SSHServer) Start(ctx context.Context) error {
 	// Load or generate host key
-	signer, err := loadHostKey(s.config.HostKeyPath)
+	hostKeyPath := s.getConfig().HostKeyPath
+	signer, err := loadHostKey(hostKeyPath)
 	if err != nil {
-		s.logger.Warn("failed to load host key, generating ephemeral key", "err", err)
+		s.logger.Warn("failed to load host key, generating new key", "err", err)
 		signer, err = generateHostKey()
 		if err != nil {
 			return fmt.Errorf("generate host key: %w", err)
 		}
-		s.logger.Warn("ephemeral host key generated - clients will see key mismatch warnings")
+		// Persist the generated key so clients don't see key mismatch on next restart
+		if persistErr := saveHostKey(hostKeyPath, signer); persistErr != nil {
+			s.logger.Warn("failed to persist host key (will be ephemeral)", "err", persistErr)
+		} else {
+			s.logger.Info("host key saved", "path", hostKeyPath)
+		}
 	}
 	s.signer = signer
 
 	sshConfig := &ssh.ServerConfig{
 		NoClientAuth: false,
 		BannerCallback: func(conn ssh.ConnMetadata) string {
-			return s.config.BannerMsg
+			return s.getConfig().BannerMsg
 		},
 	}
 	sshConfig.AddHostKey(signer)
@@ -401,10 +427,11 @@ func (s *SSHServer) Start(ctx context.Context) error {
 	go s.processEvents()
 
 	// Start the listener
-	s.logger.Info("bastion SSH server starting", "addr", s.config.SSHListenAddr)
-	listener, err := net.Listen("tcp", s.config.SSHListenAddr)
+	cfg := s.getConfig()
+	s.logger.Info("bastion SSH server starting", "addr", cfg.SSHListenAddr)
+	listener, err := net.Listen("tcp", cfg.SSHListenAddr)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", s.config.SSHListenAddr, err)
+		return fmt.Errorf("listen %s: %w", cfg.SSHListenAddr, err)
 	}
 	s.listener = listener
 
@@ -491,6 +518,19 @@ func (s *SSHServer) acceptLoop(ctx context.Context) {
 func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	clientAddr := conn.RemoteAddr().String()
+
+	// Enforce MaxSessions: increment counter, close if exceeded
+	cfg := s.getConfig()
+	if cfg.MaxSessions > 0 {
+		if s.activeConns.Add(1) > int64(cfg.MaxSessions) {
+			s.activeConns.Add(-1)
+			s.logger.Warn("max sessions reached, rejecting connection",
+				"client", clientAddr, "max", cfg.MaxSessions)
+			conn.Close()
+			return
+		}
+		defer s.activeConns.Add(-1)
+	}
 
 	// SSH handshake (auth happens inside)
 	newConn, chans, reqs, err := ssh.NewServerConn(conn, s.sshConfig)
@@ -697,7 +737,7 @@ func (s *SSHServer) presentAssetMenu(channel ssh.Channel, assets []Asset, userna
 	for i, a := range assets {
 		port := a.Port
 		if port == 0 {
-			port = s.config.DefaultPort
+			port = s.getConfig().DefaultPort
 		}
 		fmt.Fprintf(channel, "  [%d] %s (%s:%d)\n", i+1, a.Name, a.Hostname, port)
 	}
@@ -978,7 +1018,7 @@ func assetUsername(a Asset, sc *SessionContext, s *SSHServer) string {
 	if a.Username != "" {
 		return a.Username
 	}
-	return s.config.DefaultUser
+	return s.getConfig().DefaultUser
 }
 
 // generateSessionID generates a unique session identifier.
@@ -1004,6 +1044,27 @@ func generateHostKey() (ssh.Signer, error) {
 		return nil, fmt.Errorf("generate ed25519 key: %w", err)
 	}
 	return ssh.NewSignerFromKey(priv)
+}
+
+// saveHostKey persists an SSH signer's private key to path in PEM format.
+func saveHostKey(path string, signer ssh.Signer) error {
+	// Extract the underlying private key from the signer.
+	// ssh.Signer doesn't expose the key directly, so we re-derive it.
+	type keyer interface {
+		PrivateKey() interface{}
+	}
+	if k, ok := signer.(keyer); ok {
+		der, err := x509.MarshalPKCS8PrivateKey(k.PrivateKey())
+		if err != nil {
+			return fmt.Errorf("marshal host key: %w", err)
+		}
+		pemBytes := pem.EncodeToMemory(&pem.Block{
+			Type:  "PRIVATE KEY",
+			Bytes: der,
+		})
+		return os.WriteFile(path, pemBytes, 0600)
+	}
+	return fmt.Errorf("signer does not expose private key for persistence")
 }
 
 // indexByte is a simple byte search helper.

@@ -193,10 +193,11 @@ security:
       - "Content-Type"
       - "Authorization"
   
-  # API 认证 (未来扩展)
+  # API 认证
   api_auth:
-    enabled: false
-    type: "none"  # none / basic / token
+    enabled: true
+    type: "token"  # none / basic / token
+    token: ""      # Token 值(也可通过 -api-token 参数或 GOWAF_API_TOKEN 环境变量设置)
   
   # 隐藏版本信息
   hide_version: true

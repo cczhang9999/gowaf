@@ -75,8 +75,8 @@ func TestAddAllowListInvalidReturnsJSON(t *testing.T) {
 		t.Fatalf("error field missing: %v", resp)
 	}
 	// 无效条目不应部分写入
-	if len(s.waf.config.Allow) != 0 {
-		t.Fatalf("partial write on invalid input: %v", s.waf.config.Allow)
+	if len(s.waf.getConfig().Allow) != 0 {
+		t.Fatalf("partial write on invalid input: %v", s.waf.getConfig().Allow)
 	}
 }
 

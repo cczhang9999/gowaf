@@ -26,6 +26,10 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -218,13 +222,32 @@ func fatal(log *slog.Logger, msg string, err error) {
 }
 
 // initHostKey creates a host key file if it doesn't exist.
+// Generates an Ed25519 key and saves it in OpenSSH PEM format.
 func initHostKey(path string, log *slog.Logger) {
 	if _, err := os.Stat(path); err == nil {
 		return // file exists
 	}
-	// Generate and save an Ed25519 key
-	log.Info("generating new host key", "path", path)
-	// The actual key generation happens in bastion.Server.Start()
-	// This is just a placeholder for the file check
-	_ = fmt.Sprintf("%s", path)
+	log.Info("generating new SSH host key", "path", path)
+	if err := generateAndSaveHostKey(path); err != nil {
+		log.Error("failed to generate host key, will use ephemeral key at runtime", "err", err)
+	}
+}
+
+// generateAndSaveHostKey generates a new Ed25519 key and saves it in
+// OpenSSH PEM format so that loadHostKey can read it on the next start.
+func generateAndSaveHostKey(path string) error {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate ed25519 key: %w", err)
+	}
+	// Marshal to PKCS8 (binary), then PEM-encode so loadHostKey can parse it.
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return fmt.Errorf("marshal private key: %w", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: der,
+	})
+	return os.WriteFile(path, pemBytes, 0600)
 }

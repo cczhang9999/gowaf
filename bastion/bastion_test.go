@@ -3,6 +3,7 @@ package bastion
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -466,5 +467,113 @@ func TestAssetMarshalJSON(t *testing.T) {
 	}
 	if !strings.Contains(s, "test-host") {
 		t.Error("name should appear in JSON output")
+	}
+}
+
+// --- Health check & audit pagination ---
+
+func TestHealthCheckUptime(t *testing.T) {
+	api, _ := newTestAdminAPI(t)
+	h := api.Handler()
+
+	rec := doRequest(t, h, http.MethodGet, "/healthz", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /healthz = %d, want 200", rec.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok", resp["status"])
+	}
+	uptime, ok := resp["uptime"].(string)
+	if !ok || uptime == "" || uptime == "0s" {
+		t.Errorf("uptime should be a non-zero duration, got %v", resp["uptime"])
+	}
+}
+
+func TestAuditPagination(t *testing.T) {
+	api, srv := newTestAdminAPI(t)
+	h := api.Handler()
+
+	// 添加一些审计事件
+	store := srv.AuditStore()
+	for i := 0; i < 20; i++ {
+		store.Append(AuditEvent{
+			Username:  "user1",
+			SessionID: fmt.Sprintf("sess-%d", i),
+			Action:    ActionCommand,
+			Command:   fmt.Sprintf("cmd-%d", i),
+		})
+	}
+
+	// limit=5, offset=0 -> 5 个
+	rec := doRequest(t, h, http.MethodGet, "/audit?limit=5&offset=0", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /audit = %d", rec.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode audit response: %v", err)
+	}
+	if resp["count"].(float64) != 5 {
+		t.Errorf("count = %v, want 5", resp["count"])
+	}
+	if resp["limit"].(float64) != 5 {
+		t.Errorf("limit = %v, want 5", resp["limit"])
+	}
+	if resp["offset"].(float64) != 0 {
+		t.Errorf("offset = %v, want 0", resp["offset"])
+	}
+
+	// limit=5, offset=10 -> 5 个
+	rec = doRequest(t, h, http.MethodGet, "/audit?limit=5&offset=10", "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["count"].(float64) != 5 {
+		t.Errorf("count with offset=10 = %v, want 5", resp["count"])
+	}
+
+	// offset 超过总数 -> 0 个
+	rec = doRequest(t, h, http.MethodGet, "/audit?limit=5&offset=100", "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["count"].(float64) != 0 {
+		t.Errorf("count with offset=100 = %v, want 0", resp["count"])
+	}
+}
+
+func TestBastionConfigUpdate(t *testing.T) {
+	api, _ := newTestAdminAPI(t)
+	h := api.Handler()
+
+	// PUT 更新 max_sessions
+	rec := doRequest(t, h, http.MethodPut, "/config", `{"max_sessions":50,"default_port":2222}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /config = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+
+	// GET 验证
+	rec = doRequest(t, h, http.MethodGet, "/config", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /config = %d", rec.Code)
+	}
+	var cfg map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &cfg)
+	if int(cfg["max_sessions"].(float64)) != 50 {
+		t.Errorf("max_sessions = %v, want 50", cfg["max_sessions"])
+	}
+	if int(cfg["default_port"].(float64)) != 2222 {
+		t.Errorf("default_port = %v, want 2222", cfg["default_port"])
+	}
+}
+
+func TestBastionConfigUpdateInvalidPort(t *testing.T) {
+	api, _ := newTestAdminAPI(t)
+	h := api.Handler()
+
+	// 无效端口 -> 400
+	rec := doRequest(t, h, http.MethodPut, "/config", `{"default_port":99999}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("PUT invalid port = %d, want 400", rec.Code)
 	}
 }

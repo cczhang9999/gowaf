@@ -13,17 +13,57 @@
 
 ## 运行
 
+### 快速启动
+
 ```bash
 go build -o gowaf .
 ./gowaf -listen :8080 -upstream http://127.0.0.1:9000
 
 curl -i 'http://127.0.0.1:8080/?q=1+union+select+1'     # 403
 curl -i 'http://127.0.0.1:8080/?q=hello'                 # 正常转发
-curl    'http://127.0.0.1:8080/__waf/metrics'            # 仅本机可访问
+curl    'http://127.0.0.1:8080/__waf/metrics'            # 仅本机可访问(JSON)
+curl    'http://127.0.0.1:8080/__waf/metrics?format=prometheus'  # Prometheus 格式
 ```
 
+### 配置文件
+
+生产环境推荐使用 YAML 配置文件,CLI 参数优先于配置文件:
+
+```bash
+./gowaf -config /etc/gowaf/config.yaml
+```
+
+配置文件示例见 [config.yaml.example](config.yaml.example)。
+
+### API 认证
+
+管理 API 支持基于 Token 的认证,防止未授权访问:
+
+```bash
+# 通过配置文件启用
+security:
+  api_auth:
+    enabled: true
+    type: "token"
+    token: "your-secret-token"
+
+# 或通过 CLI 参数/环境变量
+./gowaf -api-token "your-secret-token"
+GOWAF_API_TOKEN="your-secret-token" ./gowaf
+```
+
+认证后,所有 API 请求需要 `Authorization: Bearer <token>` 头。
+健康检查(`/api/healthz`)豁免认证。
+
+### 监控
+
+- **JSON 指标**: `GET /api/metrics` (API 服务器) 或 `GET /__waf/metrics` (WAF, 仅本机)
+- **Prometheus 指标**: `GET /__waf/metrics?format=prometheus` (WAF, 仅本机)
+- **健康检查**: `GET /api/healthz` (检查上游连通性)
+
 常用参数:`-mode detect`(只记日志,新规则灰度用)、`-rps/-burst`、`-allow/-deny`(CIDR)、
-`-ban-strikes/-ban-for`、`-max-body`、`-trust-xff`(仅前面确有可信代理时开启)。
+`-ban-strikes/-ban-for`、`-max-body`、`-trust-xff`(仅前面确有可信代理时开启)、
+`-config`(YAML 配置文件)、`-api-token`(API 认证 Token)。
 
 ## Web 管理控制台
 
@@ -268,11 +308,24 @@ rate_limit:
 - [监控与可观测性](docs/monitoring.md) - Prometheus、Grafana、日志分析
 - [API 文档](docs/openapi.yaml) - OpenAPI 3.0 规范 (Swagger UI)
 
+## 生产就绪特性
+
+- **配置文件**: 支持 YAML 配置文件( `-config`)，CLI 参数优先于配置文件
+- **API 认证**: 支持 Bearer Token 认证( `-api-token` 或 `GOWAF_API_TOKEN` 环境变量)
+- **API 限流**: 管理 API 限流(默认 100 RPS / 200 burst per IP)
+- **Prometheus 指标**: `GET /__waf/metrics?format=prometheus` 输出 Prometheus  exposition 格式
+- **健康检查**: `/api/healthz` 检查上游连通性
+- **配置热更新**: PUT /api/config 实时更新 WAF 配置(模式、限流、封禁、IP 列表等)
+- **原子配置**: 使用 `atomic.Pointer` 保证并发读写 Config 无 data race( `-race` 通过)
+- **SSH 主机密钥**: 自动生成并持久化 Ed25519 主机密钥
+- **会话限制**: SSH 堡垒机支持 MaxSessions 并发连接限制
+
 ## 已知局限(这不是生产级 WAF)
 
 - 正则规则必然有误报/漏报;上线前先用 `-mode detect` 跑一段时间看日志
 - 没有解析 `multipart/form-data`(整体当文本检测),上传接口建议用白名单路径或单独处理
 - 不检查响应内容,没有 TLS 终止(可用 `ListenAndServeTLS` 或放在 Nginx/LB 后面)
 - 没有语义级检测(libinjection 那类 tokenizer),也没有 OWASP CRS 那种异常评分机制
+- SSH 代理到后端时不验证主机密钥( `ssh.InsecureIgnoreHostKey`)
 - 需要真正的生产方案时,可以看 Go 写的 OWASP Coraza(兼容 ModSecurity 规则语法和 CRS),
   它同样大量用到上面这些 Go 特性

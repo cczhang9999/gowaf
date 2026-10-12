@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -46,13 +47,14 @@ var fieldPool = sync.Pool{
 }
 
 type WAF struct {
-	config  Config
-	rules   atomic.Pointer[[]Rule]        // 规则热更新:整体替换指针,读路径无锁
-	kwRe    atomic.Pointer[regexp.Regexp] // 由所有规则关键词组合的全局预过滤正则
-	limiter *Limiter
-	banner  *AutoBanner
-	log     *slog.Logger
-	stats   struct{ total, matched, blocked, limited atomic.Int64 }
+	config    atomic.Pointer[Config]        // 整体替换,读路径无锁 —— 修复并发读写 Config 的 data race
+	rules     atomic.Pointer[[]Rule]        // 规则热更新:整体替换指针,读路径无锁
+	kwRe      atomic.Pointer[regexp.Regexp] // 由所有规则关键词组合的全局预过滤正则
+	limiter   *Limiter
+	banner    *AutoBanner
+	log       *slog.Logger
+	stats     struct{ total, matched, blocked, limited atomic.Int64 }
+	startTime time.Time // 用于 Prometheus uptime 指标,在 New 中设置
 }
 
 func New(cfg Config, rules []Rule, log *slog.Logger) *WAF {
@@ -71,12 +73,116 @@ func New(cfg Config, rules []Rule, log *slog.Logger) *WAF {
 	if cfg.BanFor <= 0 {
 		cfg.BanFor = 10 * time.Minute
 	}
-	w := &WAF{config: cfg, log: log, banner: NewAutoBanner(cfg.BanStrikes, cfg.BanWindow, cfg.BanFor)}
+	w := &WAF{
+		log:       log,
+		banner:    NewAutoBanner(cfg.BanStrikes, cfg.BanWindow, cfg.BanFor),
+		startTime: time.Now(),
+	}
+	w.config.Store(&cfg)
 	if cfg.RPS > 0 {
 		w.limiter = NewLimiter(cfg.RPS, cfg.Burst)
 	}
 	w.SetRules(rules)
 	return w
+}
+
+// getConfig 原子读取当前配置副本(调用者不应修改返回的指针)。
+func (w *WAF) getConfig() *Config {
+	return w.config.Load()
+}
+
+// SetConfig 原子替换整个配置(用于 API 动态更新)。
+// 使用 copy-on-write 语义:构造完整副本后整体替换指针,读路径无锁。
+func (w *WAF) SetConfig(cfg Config) {
+	if cfg.Mode == "" {
+		cfg.Mode = ModeBlock
+	}
+	if cfg.MaxBody <= 0 {
+		cfg.MaxBody = 1 << 20
+	}
+	if cfg.Burst <= 0 && cfg.RPS > 0 {
+		cfg.Burst = int(cfg.RPS) * 2
+	}
+	if cfg.BanWindow <= 0 {
+		cfg.BanWindow = time.Minute
+	}
+	if cfg.BanFor <= 0 {
+		cfg.BanFor = 10 * time.Minute
+	}
+	if cfg.RPS > 0 && w.limiter == nil {
+		w.limiter = NewLimiter(cfg.RPS, cfg.Burst)
+	}
+	w.config.Store(&cfg)
+}
+
+// AddAllow 原子节点添加到 allow 列表,读写均为原子操作。
+func (w *WAF) AddAllow(prefixes []netip.Prefix) int {
+	for {
+		old := w.config.Load()
+		updated := *old
+		updated.Allow = append(append([]netip.Prefix{}, old.Allow...), prefixes...)
+		if w.config.CompareAndSwap(old, &updated) {
+			return len(updated.Allow)
+		}
+	}
+}
+
+// RemoveAllow 原子节点从 allow 列表移除指定前缀。
+func (w *WAF) RemoveAllow(prefixes []netip.Prefix) {
+	want := make(map[string]struct{}, len(prefixes))
+	for _, p := range prefixes {
+		want[p.String()] = struct{}{}
+	}
+	for {
+		old := w.config.Load()
+		updated := *old
+		filtered := make([]netip.Prefix, 0, len(old.Allow))
+		for _, p := range old.Allow {
+			if _, remove := want[p.String()]; remove {
+				continue
+			}
+			filtered = append(filtered, p)
+		}
+		updated.Allow = filtered
+		if w.config.CompareAndSwap(old, &updated) {
+			return
+		}
+	}
+}
+
+// AddDeny 原子节点添加到 deny 列表。
+func (w *WAF) AddDeny(prefixes []netip.Prefix) int {
+	for {
+		old := w.config.Load()
+		updated := *old
+		updated.Deny = append(append([]netip.Prefix{}, old.Deny...), prefixes...)
+		if w.config.CompareAndSwap(old, &updated) {
+			return len(updated.Deny)
+		}
+	}
+}
+
+// RemoveDeny 原子节点从 deny 列表移除指定前缀。
+func (w *WAF) RemoveDeny(prefixes []netip.Prefix) {
+	want := make(map[string]struct{}, len(prefixes))
+	for _, p := range prefixes {
+		want[p.String()] = struct{}{}
+	}
+	for {
+		old := w.config.Load()
+		updated := *old
+		filtered := make([]netip.Prefix, 0, len(old.Deny))
+		for _, p := range old.Deny {
+			if _, remove := want[p.String()]; remove {
+				continue
+			}
+			filtered = append(filtered, p)
+		}
+		updated.Deny = filtered
+		if w.config.CompareAndSwap(old, &updated) {
+			return
+		}
+	}
 }
 
 // SetRules 原子替换规则集,可在运行中安全调用(例如收到 SIGHUP)。
@@ -159,16 +265,17 @@ func (w *WAF) extract(r *http.Request) ([]Field, error) {
 	if r.Body == nil || r.Body == http.NoBody {
 		return fs, nil
 	}
-	if r.ContentLength > w.config.MaxBody {
+	maxBody := w.getConfig().MaxBody
+	if r.ContentLength > maxBody {
 		fieldPool.Put(fs)
 		return nil, errBodyTooLarge
 	}
-	b, err := io.ReadAll(io.LimitReader(r.Body, w.config.MaxBody+1))
+	b, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
 		fieldPool.Put(fs)
 		return nil, err
 	}
-	if int64(len(b)) > w.config.MaxBody {
+	if int64(len(b)) > maxBody {
 		fieldPool.Put(fs)
 		return nil, errBodyTooLarge
 	}
@@ -265,7 +372,7 @@ func (w *WAF) clientIP(r *http.Request) netip.Addr {
 		host = r.RemoteAddr
 	}
 	ip, _ := netip.ParseAddr(host)
-	if w.config.TrustXFF {
+	if w.getConfig().TrustXFF {
 		// 取最右一项:那是可信代理自己追加的,左边的内容客户端可以随意伪造
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
@@ -323,11 +430,13 @@ func (w *WAF) Handler(next http.Handler) http.Handler {
 		id := newID()
 		rw.Header().Set("X-WAF-Request-ID", id)
 
-		if inPrefixes(w.config.Allow, ip) {
+		cfg := w.getConfig()
+
+		if inPrefixes(cfg.Allow, ip) {
 			next.ServeHTTP(rw, r)
 			return
 		}
-		if inPrefixes(w.config.Deny, ip) || w.banner.Banned(ip) {
+		if inPrefixes(cfg.Deny, ip) || w.banner.Banned(ip) {
 			w.stats.blocked.Add(1)
 			w.reject(rw, r, rejectInfo{ID: id, IP: ip, Status: http.StatusForbidden, Reason: "ip_denied"})
 			return
@@ -362,10 +471,10 @@ func (w *WAF) Handler(next http.Handler) http.Handler {
 
 		if m != nil {
 			w.stats.matched.Add(1)
-			if w.config.Mode == ModeBlock {
+			if cfg.Mode == ModeBlock {
 				w.stats.blocked.Add(1)
 				if w.banner.Strike(ip) {
-					w.log.Warn("ip banned", "ip", ip.String(), "for", w.config.BanFor.String())
+					w.log.Warn("ip banned", "ip", ip.String(), "for", cfg.BanFor.String())
 				}
 				w.reject(rw, r, rejectInfo{ID: id, IP: ip, Status: http.StatusForbidden, Reason: "rule_match", Match: m})
 				return
@@ -377,10 +486,16 @@ func (w *WAF) Handler(next http.Handler) http.Handler {
 	})
 }
 
-// serveMetrics 只允许本机访问,避免把内部统计暴露给公网。
+// serveMetrics 支持两种格式:JSON(JSON,用于浏览器)和 Prometheus(用于监控系统)。
+// 只允许本机访问,避免把内部统计暴露给公网。
 func (w *WAF) serveMetrics(rw http.ResponseWriter, r *http.Request, ip netip.Addr) {
 	if !ip.IsLoopback() {
 		http.NotFound(rw, r)
+		return
+	}
+	cfg := w.getConfig()
+	if r.URL.Query().Get("format") == "prometheus" {
+		w.servePrometheusMetrics(rw)
 		return
 	}
 	rw.Header().Set("Content-Type", "application/json")
@@ -390,6 +505,51 @@ func (w *WAF) serveMetrics(rw http.ResponseWriter, r *http.Request, ip netip.Add
 		"blocked":        w.stats.blocked.Load(),
 		"rate_limited":   w.stats.limited.Load(),
 		"rules_loaded":   len(*w.rules.Load()),
-		"mode":           w.config.Mode,
+		"mode":           cfg.Mode,
+		"allow_count":    len(cfg.Allow),
+		"deny_count":     len(cfg.Deny),
 	})
+}
+
+// servePrometheusMetrics 输出 Prometheus  exposition 格式的指标。
+func (w *WAF) servePrometheusMetrics(rw http.ResponseWriter) {
+	rw.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	cfg := w.getConfig()
+	now := time.Now().Unix()
+	lines := []string{
+		fmt.Sprintf("# HELP gowaf_requests_total Total requests processed by the WAF."),
+		fmt.Sprintf("# TYPE gowaf_requests_total counter"),
+		fmt.Sprintf(`gowaf_requests_total %d`, w.stats.total.Load()),
+		fmt.Sprintf("# HELP gowaf_rule_matched_total Requests that matched a WAF rule."),
+		fmt.Sprintf("# TYPE gowaf_rule_matched_total counter"),
+		fmt.Sprintf(`gowaf_rule_matched_total %d`, w.stats.matched.Load()),
+		fmt.Sprintf("# HELP gowaf_blocked_total Requests blocked by the WAF."),
+		fmt.Sprintf("# TYPE gowaf_blocked_total counter"),
+		fmt.Sprintf(`gowaf_blocked_total %d`, w.stats.blocked.Load()),
+		fmt.Sprintf("# HELP gowaf_rate_limited_total Requests rejected by rate limiting."),
+		fmt.Sprintf("# TYPE gowaf_rate_limited_total counter"),
+		fmt.Sprintf(`gowaf_rate_limited_total %d`, w.stats.limited.Load()),
+		fmt.Sprintf("# HELP gowaf_rules_loaded Number of loaded WAF rules."),
+		fmt.Sprintf("# TYPE gowaf_rules_loaded gauge"),
+		fmt.Sprintf(`gowaf_rules_loaded %d`, len(*w.rules.Load())),
+		fmt.Sprintf("# HELP gowaf_mode WAF mode (1=block, 0=detect)."),
+		fmt.Sprintf("# TYPE gowaf_mode gauge"),
+	}
+	if cfg.Mode == ModeBlock {
+		lines = append(lines, fmt.Sprintf(`gowaf_mode 1`))
+	} else {
+		lines = append(lines, fmt.Sprintf(`gowaf_mode 0`))
+	}
+	lines = append(lines,
+		fmt.Sprintf("# HELP gowaf_allowlist_ips Number of IPs in the allowlist."),
+		fmt.Sprintf("# TYPE gowaf_allowlist_ips gauge"),
+		fmt.Sprintf(`gowaf_allowlist_ips %d`, len(cfg.Allow)),
+		fmt.Sprintf("# HELP gowaf_denylist_ips Number of IPs in the denylist."),
+		fmt.Sprintf("# TYPE gowaf_denylist_ips gauge"),
+		fmt.Sprintf(`gowaf_denylist_ips %d`, len(cfg.Deny)),
+		fmt.Sprintf("# HELP gowaf_uptime_seconds Uptime of the WAF process."),
+		fmt.Sprintf("# TYPE gowaf_uptime_seconds gauge"),
+		fmt.Sprintf(`gowaf_uptime_seconds %d`, now-w.startTime.Unix()),
+	)
+	rw.Write([]byte(strings.Join(lines, "\n") + "\n"))
 }

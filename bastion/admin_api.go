@@ -363,7 +363,7 @@ func (a *AdminAPI) createAsset(w http.ResponseWriter, r *http.Request) {
 
 	id := assetID(req.Hostname, req.Port)
 	if req.Port == 0 {
-		req.Port = a.Server.config.DefaultPort
+		req.Port = a.Server.getConfig().DefaultPort
 	}
 
 	asset := Asset{
@@ -659,9 +659,33 @@ func (a *AdminAPI) listAudit(w http.ResponseWriter, r *http.Request) {
 		events = a.Server.AuditStore().ListBySession(sessionID)
 	}
 
+	// 分页参数(支持 limit / offset)
+	limit := len(events)
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	offset := 0
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if n, err := strconv.Atoi(o); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	if offset >= len(events) {
+		events = nil
+	} else if offset+limit < len(events) {
+		events = events[offset : offset+limit]
+	} else {
+		events = events[offset:]
+	}
+
 	a.json(w, http.StatusOK, map[string]any{
 		"events": events,
 		"count":  len(events),
+		"limit":  limit,
+		"offset": offset,
+		"total":  len(a.Server.AuditStore().List()),
 	})
 }
 
@@ -731,7 +755,7 @@ func (a *AdminAPI) handleConfig() http.HandlerFunc {
 }
 
 func (a *AdminAPI) getConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := a.Server.config
+	cfg := a.Server.getConfig()
 	a.json(w, http.StatusOK, map[string]any{
 		"ssh_listen_addr": cfg.SSHListenAddr,
 		"api_listen_addr": cfg.APIListenAddr,
@@ -748,17 +772,26 @@ func (a *AdminAPI) getConfig(w http.ResponseWriter, r *http.Request) {
 func (a *AdminAPI) updateConfig(w http.ResponseWriter, r *http.Request) {
 	var req map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		writeJSONErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	cfg := a.Server.config
+	cfg := *a.Server.getConfig()
 	if v, ok := req["default_user"].(string); ok {
 		cfg.DefaultUser = v
 	}
 	if v, ok := req["default_port"].(float64); ok {
-		cfg.DefaultPort = int(v)
+		port := int(v)
+		if port < 1 || port > 65535 {
+			writeJSONErr(w, http.StatusBadRequest, "default_port must be between 1 and 65535")
+			return
+		}
+		cfg.DefaultPort = port
 	}
 	if v, ok := req["max_sessions"].(float64); ok {
+		if v < 0 {
+			writeJSONErr(w, http.StatusBadRequest, "max_sessions must be non-negative")
+			return
+		}
 		cfg.MaxSessions = int(v)
 	}
 	if v, ok := req["banner_msg"].(string); ok {
@@ -767,18 +800,22 @@ func (a *AdminAPI) updateConfig(w http.ResponseWriter, r *http.Request) {
 	if v, ok := req["recording_dir"].(string); ok {
 		cfg.RecordingDir = v
 	}
-	a.Server.SetConfig(cfg)
+	a.Server.SetConfig(&cfg)
 	a.json(w, http.StatusOK, map[string]any{"success": true})
 }
 
 // --- Health & Metrics ---
 
 func (a *AdminAPI) handleHealth(w http.ResponseWriter, r *http.Request) {
+	uptime := "unknown"
+	if start := a.Server.StartTime(); !start.IsZero() {
+		uptime = time.Since(start).String()
+	}
 	a.json(w, http.StatusOK, map[string]any{
 		"status":          "ok",
-		"ssh_listen":      a.Server.config.SSHListenAddr,
+		"ssh_listen":      a.Server.getConfig().SSHListenAddr,
 		"user_store":      a.Server.UserStoreName(),
-		"uptime":          time.Since(time.Now()).String(),
+		"uptime":          uptime,
 		"active_sessions": len(a.Server.ActiveSessions()),
 	})
 }

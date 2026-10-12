@@ -1,13 +1,19 @@
 package main
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"regexp"
+	"strings"
 	"sync"
+	"time"
 
 	"gowaf/bastion"
 	"gowaf/internal/middleware"
@@ -23,28 +29,59 @@ type APIServer struct {
 	log        *slog.Logger
 	bastion    *bastion.SSHServer // SSH 堰垒机服务器(可选)
 	bastionLog *slog.Logger
+	apiToken   string   // API 认证 Token,空表示不启用认证
+	upstream   string   // 上游服务器 URL,用于健康检查
+	apiLimiter *Limiter // API 接口限流(按 IP),nil 表示不限流
 }
 
 // NewAPIServer creates API server
 func NewAPIServer(waf *WAF, addr string, log *slog.Logger) *APIServer {
+	return NewAPIServerWithBastion(waf, addr, "", "", nil, log)
+}
+
+// NewAPIServerWithBastion creates API server with SSH bastion and optional API token auth.
+// apiToken: Bearer token for API auth (empty = no auth).
+// upstream: upstream server URL for health checks (empty = skip).
+func NewAPIServerWithBastion(waf *WAF, addr string, apiToken string, upstream string, bastionSrv *bastion.SSHServer, log *slog.Logger) *APIServer {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &APIServer{
-		waf:  waf,
-		addr: addr,
-		log:  log,
-	}
-}
-
-// NewAPIServerWithBastion creates API server with SSH bastion
-func NewAPIServerWithBastion(waf *WAF, addr string, bastionSrv *bastion.SSHServer, log *slog.Logger) *APIServer {
 	return &APIServer{
 		waf:        waf,
 		addr:       addr,
 		log:        log,
 		bastion:    bastionSrv,
 		bastionLog: log,
+		apiToken:   apiToken,
+		upstream:   upstream,
+	}
+}
+
+// SetAPIRateLimit enables per-IP rate limiting on the API server.
+func (s *APIServer) SetAPIRateLimit(rps float64, burst int) {
+	if rps > 0 {
+		s.apiLimiter = NewLimiter(rps, burst)
+	}
+}
+
+// apiRateLimit is a middleware that limits API requests per IP.
+func (s *APIServer) apiRateLimit() func(http.Handler) http.Handler {
+	if s.apiLimiter == nil {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := clientIPFromRequest(r)
+			if ip != nil {
+				ok, wait := s.apiLimiter.Allow(*ip)
+				if !ok {
+					w.Header().Set("Retry-After", fmt.Sprintf("%.0f", wait.Seconds()))
+					writeJSONErr(w, http.StatusTooManyRequests, "rate limit exceeded")
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 }
 
@@ -83,14 +120,56 @@ func (s *APIServer) Start() error {
 		mux.Handle("/bastion/", http.StripPrefix("/bastion", bastionNotEnabled))
 	}
 
-	s.log.Info("api server starting", "addr", s.addr)
+	s.log.Info("api server starting", "addr", s.addr, "auth", len(s.apiToken) > 0)
+
+	handler := middleware.Logging(s.log)(mux)
+	handler = s.apiRateLimit()(handler)
+	if s.apiToken != "" {
+		handler = s.authToken(s.apiToken)(handler)
+	}
 
 	s.server = &http.Server{
-		Addr:    s.addr,
-		Handler: middleware.Logging(s.log)(mux),
+		Addr:              s.addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 16,
 	}
 
 	return s.server.ListenAndServe()
+}
+
+// authToken 返回一个 HTTP 中间件,要求请求携带正确的 Bearer Token。
+// 健康检查接口(/api/healthz)豁免认证,以便负载均衡器探测。
+func (s *APIServer) authToken(token string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// 健康检查豁免认证
+			if r.URL.Path == "/api/healthz" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			auth := r.Header.Get("Authorization")
+			if auth == "" {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="gowaf-api"`)
+				writeJSONErr(w, http.StatusUnauthorized, "missing Authorization header")
+				return
+			}
+			parts := strings.SplitN(auth, " ", 2)
+			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="gowaf-api"`)
+				writeJSONErr(w, http.StatusUnauthorized, "invalid Authorization header format, expected 'Bearer <token>'")
+				return
+			}
+			if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(token)) != 1 {
+				writeJSONErr(w, http.StatusForbidden, "invalid API token")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // Stop 停止 API 服务器
@@ -316,7 +395,7 @@ func (s *APIServer) handleConfig() http.HandlerFunc {
 }
 
 func (s *APIServer) getConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := s.waf.config
+	cfg := s.waf.getConfig()
 	allowStrs := make([]string, len(cfg.Allow))
 	for i, p := range cfg.Allow {
 		allowStrs[i] = p.String()
@@ -344,35 +423,52 @@ func (s *APIServer) getConfig(w http.ResponseWriter, r *http.Request) {
 func (s *APIServer) updateConfig(w http.ResponseWriter, r *http.Request) {
 	var dto configResponse
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		writeJSONErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+
+	// 验证 mode
+	if dto.Mode != "" && dto.Mode != ModeBlock && dto.Mode != ModeDetect {
+		writeJSONErr(w, http.StatusBadRequest, "mode must be 'block' or 'detect', got: "+dto.Mode)
 		return
 	}
 
 	// 解析 IP 列表
 	allowList, err := parsePrefixesSlice(dto.Allow)
 	if err != nil {
-		http.Error(w, "invalid allow list: "+err.Error(), http.StatusBadRequest)
+		writeJSONErr(w, http.StatusBadRequest, "invalid allow list: "+err.Error())
 		return
 	}
 	denyList, err := parsePrefixesSlice(dto.Deny)
 	if err != nil {
-		http.Error(w, "invalid deny list: "+err.Error(), http.StatusBadRequest)
+		writeJSONErr(w, http.StatusBadRequest, "invalid deny list: "+err.Error())
 		return
 	}
 
-	// 更新配置
-	updated := s.waf.config
+	// 解析 BanFor duration
+	banFor := s.waf.getConfig().BanFor
+	if dto.BanFor != "" {
+		d, err := time.ParseDuration(dto.BanFor)
+		if err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "invalid banFor duration: "+err.Error())
+			return
+		}
+		banFor = d
+	}
+
+	// 原子替换整个配置
+	updated := *s.waf.getConfig()
 	updated.Mode = dto.Mode
 	updated.MaxBody = dto.MaxBody
 	updated.RPS = dto.RPS
 	updated.Burst = dto.Burst
 	updated.TrustXFF = dto.TrustXFF
 	updated.BanStrikes = dto.BanStrikes
+	updated.BanFor = banFor
 	updated.Allow = allowList
 	updated.Deny = denyList
 
-	// 注意：BanFor 需要解析 duration
-	// 这里保持原值，实际可通过额外参数设置
+	s.waf.SetConfig(updated)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"success": true})
@@ -427,10 +523,11 @@ func (s *APIServer) handleAllowList() http.HandlerFunc {
 }
 
 func (s *APIServer) getAllowList(w http.ResponseWriter, r *http.Request) {
+	cfg := s.waf.getConfig()
 	ips := ipListResponse{
-		IPs: make([]string, len(s.waf.config.Allow)),
+		IPs: make([]string, len(cfg.Allow)),
 	}
-	for i, p := range s.waf.config.Allow {
+	for i, p := range cfg.Allow {
 		ips.IPs[i] = p.String()
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -451,7 +548,8 @@ func (s *APIServer) addToAllowList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	current := s.waf.config.Allow
+	current := s.waf.getConfig().Allow
+	var toAdd []netip.Prefix
 	for _, ipStr := range ips.IPs {
 		p, err := netip.ParsePrefix(ipStr)
 		if err != nil {
@@ -471,13 +569,13 @@ func (s *APIServer) addToAllowList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !exists {
-			current = append(current, p)
+			toAdd = append(toAdd, p)
 		}
 	}
 
-	s.waf.config.Allow = current
+	count := s.waf.AddAllow(toAdd)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"success": true, "count": len(s.waf.config.Allow)})
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "count": count})
 }
 
 func (s *APIServer) removeFromAllowList(w http.ResponseWriter, r *http.Request) {
@@ -489,29 +587,19 @@ func (s *APIServer) removeFromAllowList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	current := s.waf.config.Allow
-	var newAllow []netip.Prefix
-	for _, p := range current {
-		shouldRemove := false
-		for _, ipStr := range ips.IPs {
-			removeP, err := netip.ParsePrefix(ipStr)
-			if err != nil {
-				a, err2 := netip.ParseAddr(ipStr)
-				if err2 == nil {
-					removeP = netip.PrefixFrom(a, a.BitLen())
-				}
-			}
-			if p.String() == removeP.String() {
-				shouldRemove = true
-				break
+	var toRemove []netip.Prefix
+	for _, ipStr := range ips.IPs {
+		p, err := netip.ParsePrefix(ipStr)
+		if err != nil {
+			a, err2 := netip.ParseAddr(ipStr)
+			if err2 == nil {
+				p = netip.PrefixFrom(a, a.BitLen())
 			}
 		}
-		if !shouldRemove {
-			newAllow = append(newAllow, p)
-		}
+		toRemove = append(toRemove, p)
 	}
 
-	s.waf.config.Allow = newAllow
+	s.waf.RemoveAllow(toRemove)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"success": true})
 }
@@ -534,10 +622,11 @@ func (s *APIServer) handleDenyList() http.HandlerFunc {
 }
 
 func (s *APIServer) getDenyList(w http.ResponseWriter, r *http.Request) {
+	cfg := s.waf.getConfig()
 	ips := ipListResponse{
-		IPs: make([]string, len(s.waf.config.Deny)),
+		IPs: make([]string, len(cfg.Deny)),
 	}
-	for i, p := range s.waf.config.Deny {
+	for i, p := range cfg.Deny {
 		ips.IPs[i] = p.String()
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -558,7 +647,8 @@ func (s *APIServer) addToDenyList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	current := s.waf.config.Deny
+	current := s.waf.getConfig().Deny
+	var toAdd []netip.Prefix
 	for _, ipStr := range ips.IPs {
 		p, err := netip.ParsePrefix(ipStr)
 		if err != nil {
@@ -578,13 +668,13 @@ func (s *APIServer) addToDenyList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !exists {
-			current = append(current, p)
+			toAdd = append(toAdd, p)
 		}
 	}
 
-	s.waf.config.Deny = current
+	count := s.waf.AddDeny(toAdd)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"success": true, "count": len(s.waf.config.Deny)})
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "count": count})
 }
 
 func (s *APIServer) removeFromDenyList(w http.ResponseWriter, r *http.Request) {
@@ -596,10 +686,9 @@ func (s *APIServer) removeFromDenyList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	current := s.waf.config.Deny
-	var newDeny []netip.Prefix
+	current := s.waf.getConfig().Deny
+	var toRemove []netip.Prefix
 	for _, p := range current {
-		shouldRemove := false
 		for _, ipStr := range ips.IPs {
 			removeP, err := netip.ParsePrefix(ipStr)
 			if err != nil {
@@ -609,16 +698,13 @@ func (s *APIServer) removeFromDenyList(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if p.String() == removeP.String() {
-				shouldRemove = true
+				toRemove = append(toRemove, p)
 				break
 			}
 		}
-		if !shouldRemove {
-			newDeny = append(newDeny, p)
-		}
 	}
 
-	s.waf.config.Deny = newDeny
+	s.waf.RemoveDeny(toRemove)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"success": true})
 }
@@ -627,6 +713,7 @@ func (s *APIServer) removeFromDenyList(w http.ResponseWriter, r *http.Request) {
 
 func (s *APIServer) handleMetrics() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		cfg := s.waf.getConfig()
 		w.Header().Set("Content-Type", "application/json")
 		rules := *s.waf.rules.Load()
 		json.NewEncoder(w).Encode(map[string]any{
@@ -635,18 +722,72 @@ func (s *APIServer) handleMetrics() http.HandlerFunc {
 			"blocked":        s.waf.stats.blocked.Load(),
 			"rate_limited":   s.waf.stats.limited.Load(),
 			"rules_loaded":   len(rules),
-			"mode":           s.waf.config.Mode,
-			"allow_count":    len(s.waf.config.Allow),
-			"deny_count":     len(s.waf.config.Deny),
+			"mode":           cfg.Mode,
+			"allow_count":    len(cfg.Allow),
+			"deny_count":     len(cfg.Deny),
 		})
 	}
 }
 
 // 健康检查
 
+// clientIPFromRequest extracts the client IP from RemoteAddr.
+// API server is an internal interface, so we don't trust X-Forwarded-For.
+func clientIPFromRequest(r *http.Request) *netip.Addr {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return nil
+	}
+	return &ip
+}
+
 func (s *APIServer) handleHealth() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"status": "ok",
+		}
+		// 如果配置了上游,则探活上游
+		if s.upstream != "" {
+			if err := checkUpstream(s.upstream); err != nil {
+				resp["status"] = "degraded"
+				resp["upstream"] = "unreachable"
+				resp["upstream_error"] = err.Error()
+				w.WriteHeader(http.StatusServiceUnavailable)
+			} else {
+				resp["upstream"] = "reachable"
+			}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	}
+}
+
+// checkUpstream does a quick HEAD/GET to verify the upstream is reachable.
+func checkUpstream(upstream string) error {
+	u, err := url.Parse(upstream)
+	if err != nil {
+		return fmt.Errorf("invalid upstream URL: %w", err)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("upstream URL has no host")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, upstream, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("upstream unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("upstream returned %d", resp.StatusCode)
+	}
+	return nil
 }
