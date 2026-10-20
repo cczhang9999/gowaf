@@ -2,16 +2,16 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"regexp"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -32,7 +32,17 @@ type APIServer struct {
 	apiToken   string   // API 认证 Token,空表示不启用认证
 	upstream   string   // 上游服务器 URL,用于健康检查
 	apiLimiter *Limiter // API 接口限流(按 IP),nil 表示不限流
+	// authBanner 记录认证失败次数,达到阈值后临时封禁该 IP。
+	// 限流器只关心「请求多快」,这里关心「猜了多少次 Token」——两者互补。
+	authBanner *AutoBanner
 }
+
+// API 认证失败的封禁策略:1 分钟内失败 5 次 → 封禁 15 分钟。
+const (
+	apiAuthStrikes  = 5
+	apiAuthWindow   = time.Minute
+	apiAuthLockTime = 15 * time.Minute
+)
 
 // NewAPIServer creates API server
 func NewAPIServer(waf *WAF, addr string, log *slog.Logger) *APIServer {
@@ -54,6 +64,7 @@ func NewAPIServerWithBastion(waf *WAF, addr string, apiToken string, upstream st
 		bastionLog: log,
 		apiToken:   apiToken,
 		upstream:   upstream,
+		authBanner: NewAutoBanner(apiAuthStrikes, apiAuthWindow, apiAuthLockTime),
 	}
 }
 
@@ -64,24 +75,75 @@ func (s *APIServer) SetAPIRateLimit(rps float64, burst int) {
 	}
 }
 
-// apiRateLimit is a middleware that limits API requests per IP.
-func (s *APIServer) apiRateLimit() func(http.Handler) http.Handler {
-	if s.apiLimiter == nil {
-		return func(next http.Handler) http.Handler { return next }
-	}
+// apiGuard is the outermost middleware on the management API. It runs BEFORE
+// authentication on purpose: an attacker sending a wrong bearer token must
+// still consume rate-limit budget, otherwise the token can be brute-forced at
+// unbounded speed.
+//
+// Order of checks: temporary auth lockout → per-IP token bucket → next.
+func (s *APIServer) apiGuard() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := clientIPFromRequest(r)
 			if ip != nil {
-				ok, wait := s.apiLimiter.Allow(*ip)
-				if !ok {
-					w.Header().Set("Retry-After", fmt.Sprintf("%.0f", wait.Seconds()))
-					writeJSONErr(w, http.StatusTooManyRequests, "rate limit exceeded")
+				if s.authBanner != nil && s.authBanner.Banned(*ip) {
+					w.Header().Set("Retry-After", retryAfterSeconds(apiAuthLockTime))
+					writeJSONErr(w, http.StatusTooManyRequests,
+						"too many failed authentication attempts; try again later")
 					return
+				}
+				if s.apiLimiter != nil {
+					if ok, wait := s.apiLimiter.Allow(*ip); !ok {
+						w.Header().Set("Retry-After", retryAfterSeconds(wait))
+						writeJSONErr(w, http.StatusTooManyRequests, "rate limit exceeded")
+						return
+					}
 				}
 			}
 			next.ServeHTTP(w, r)
 		})
+	}
+}
+
+// retryAfterSeconds renders a wait duration as Retry-After seconds.
+// Always at least 1: "Retry-After: 0" would invite an immediate retry storm.
+func retryAfterSeconds(d time.Duration) string {
+	secs := int(math.Ceil(d.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	return strconv.Itoa(secs)
+}
+
+// statusRecorder captures the status code so callers can react to it.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// Run starts the background cleaner for the management API's per-IP state.
+// Without it, apiLimiter and authBanner grow without bound on an API exposed to
+// many source IPs (previously only the data-plane limiter was ever GC'd).
+func (s *APIServer) Run(ctx context.Context) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if s.apiLimiter != nil {
+				s.apiLimiter.GC(10 * time.Minute)
+			}
+			if s.authBanner != nil {
+				s.authBanner.GC()
+			}
+		}
 	}
 }
 
@@ -122,11 +184,14 @@ func (s *APIServer) Start() error {
 
 	s.log.Info("api server starting", "addr", s.addr, "auth", len(s.apiToken) > 0)
 
+	// 中间件顺序(由外到内):限流/封禁 → 认证 → 访问日志 → 业务。
+	// 限流必须在认证之外,否则携带错误 Token 的请求会在限流器之前被 401 拦截,
+	// 攻击者可以无限速地爆破 Token。
 	handler := middleware.Logging(s.log)(mux)
-	handler = s.apiRateLimit()(handler)
 	if s.apiToken != "" {
 		handler = s.authToken(s.apiToken)(handler)
 	}
+	handler = s.apiGuard()(handler)
 
 	s.server = &http.Server{
 		Addr:              s.addr,
@@ -143,31 +208,28 @@ func (s *APIServer) Start() error {
 
 // authToken 返回一个 HTTP 中间件,要求请求携带正确的 Bearer Token。
 // 健康检查接口(/api/healthz)豁免认证,以便负载均衡器探测。
+//
+// 认证失败(401/403)会记一次 strike,累计到阈值后由 apiGuard 临时封禁该 IP。
 func (s *APIServer) authToken(token string) func(http.Handler) http.Handler {
+	guarded := middleware.BearerToken(token, "/api/healthz")
 	return func(next http.Handler) http.Handler {
+		inner := guarded(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// 健康检查豁免认证
-			if r.URL.Path == "/api/healthz" {
-				next.ServeHTTP(w, r)
+			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			inner.ServeHTTP(rec, r)
+
+			isRejection := rec.status == http.StatusUnauthorized || rec.status == http.StatusForbidden
+			if !isRejection || s.authBanner == nil {
 				return
 			}
-			auth := r.Header.Get("Authorization")
-			if auth == "" {
-				w.Header().Set("WWW-Authenticate", `Bearer realm="gowaf-api"`)
-				writeJSONErr(w, http.StatusUnauthorized, "missing Authorization header")
+			ip := clientIPFromRequest(r)
+			if ip == nil {
 				return
 			}
-			parts := strings.SplitN(auth, " ", 2)
-			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-				w.Header().Set("WWW-Authenticate", `Bearer realm="gowaf-api"`)
-				writeJSONErr(w, http.StatusUnauthorized, "invalid Authorization header format, expected 'Bearer <token>'")
-				return
+			if s.authBanner.Strike(*ip) {
+				s.log.Warn("api client banned after repeated authentication failures",
+					"ip", ip.String(), "for", apiAuthLockTime.String())
 			}
-			if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(token)) != 1 {
-				writeJSONErr(w, http.StatusForbidden, "invalid API token")
-				return
-			}
-			next.ServeHTTP(w, r)
 		})
 	}
 }

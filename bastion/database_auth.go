@@ -223,11 +223,26 @@ func (s *DatabaseAuthStore) ListUsersWithErr() ([]*User, error) {
 }
 
 // HasUser 检查用户是否存在。
+//
+// 注意:它把「查询失败」也当成「不存在」。写路径(创建用户、初始化管理员)
+// 必须改用 HasUserErr,否则数据库抖动时会误判用户不存在,进而走
+// AddUser → UpsertUser 的更新分支,静默覆盖已有用户的密码/角色/资产。
 func (s *DatabaseAuthStore) HasUser(username string) bool {
-	if _, err := s.repo.GetUserByUsername(context.Background(), username); err != nil {
-		return false
+	ok, _ := s.HasUserErr(username)
+	return ok
+}
+
+// HasUserErr 区分「用户不存在」(false, nil)和「数据库查询失败」(_, err)。
+func (s *DatabaseAuthStore) HasUserErr(username string) (bool, error) {
+	_, err := s.repo.GetUserByUsername(context.Background(), username)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, store.ErrUserNotFound):
+		return false, nil
+	default:
+		return false, err
 	}
-	return true
 }
 
 // CanAccessAsset 检查用户是否可以访问指定资产。

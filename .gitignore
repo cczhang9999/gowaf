@@ -2291,3 +2291,13 @@ Thumbs.db
 /.build-cache/ff/ffdc3f01b2de020d6bda0a8aa55e32a2d352ea126202c6151539d7fb42db95e8-a
 /.build-cache/README
 /.build-cache/trim.txt
+
+# --- 本地运行配置与密钥(含数据库口令 / API Token / 主机密钥)---
+config.yaml
+config.local.yaml
+ssh_host_key
+ssh_host_key.pub
+recordings/
+audit.log
+*.env
+.env.local

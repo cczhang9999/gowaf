@@ -55,6 +55,18 @@ GOWAF_API_TOKEN="your-secret-token" ./gowaf
 认证后,所有 API 请求需要 `Authorization: Bearer <token>` 头。
 健康检查(`/api/healthz`)豁免认证。
 
+**fail-closed**:`enabled: true` 但 token 为空时,进程**拒绝启动**并打印修复指引,
+不再像以前那样静默跳过认证中间件。需要显式关闭请设 `enabled: false`。
+
+**默认只监听本机**:管理 API 默认绑定 `127.0.0.1:8081`。确需远程访问,请显式改成
+`":8081"` 并务必启用认证 —— 管理面能改规则、改配置、增删堡垒机用户。
+
+**控制台**:Web 控制台会在浏览器 `localStorage` 中保存该 token,自动附加到请求头;
+首次遇到 401/403 时会弹框提示粘贴,无需手动改前端代码。
+
+**防暴力破解**:限流中间件位于认证**之外**,携带错误 Token 的请求同样消耗限流额度;
+连续 5 次认证失败(1 分钟窗口)将封禁该 IP 15 分钟(`429` + `Retry-After`)。
+
 ### 监控
 
 - **JSON 指标**: `GET /api/metrics` (API 服务器) 或 `GET /__waf/metrics` (WAF, 仅本机)
@@ -170,17 +182,26 @@ pnpm dev
 所以控制台里建的用户可以直接用来登 SSH。
 
 ```bash
-# 方式 1:使用仓库自带的 config.yaml(已指向 myapp 库)
+# 方式 1:使用本地 config.yaml(已指向 myapp 库)
 ./gowaf -config config.yaml
 
-# 方式 2:独立堡垒机
-./bastion -api-listen :8081 \
+# 方式 2:独立堡垒机(管理 API 需要 Token)
+./bastion -api-listen 127.0.0.1:8081 -api-token 'your-secret-token' \
   -mysql-dsn 'user:pass@tcp(127.0.0.1:3306)/myapp?charset=utf8mb4&parseTime=True&loc=Local'
 
 # 方式 3:WAF + 堡垒机管理面(同一个 API 地址)
 ./gowaf -listen :8080 -upstream http://127.0.0.1:9000 -api-addr :8081 \
+  -api-token 'your-secret-token' \
   -mysql-dsn 'user:pass@tcp(127.0.0.1:3306)/myapp?charset=utf8mb4&parseTime=True&loc=Local'
 ```
+
+> **口令不要写进版本库。** `config.yaml` 已加入 `.gitignore`(不再被跟踪,权限 `0600`)。
+> 推荐用环境变量注入 DSN,优先级为 `-mysql-dsn` flag > `GOWAF_MYSQL_DSN` > YAML:
+>
+> ```bash
+> export GOWAF_MYSQL_DSN='user:pass@tcp(host:3306)/myapp?charset=utf8mb4&parseTime=True&loc=Local'
+> ./gowaf -config config.yaml
+> ```
 
 | 接口 | 说明 |
 |---|---|
@@ -212,12 +233,16 @@ pnpm dev
 
 ```bash
 # 方式 1: 在 WAF 之外同时启用 SSH 堰垒机
-./gowaf -listen :8080 -upstream http://127.0.0.1:9000 -ssh -ssh-listen :2222 -api-addr :8081
+./gowaf -listen :8080 -upstream http://127.0.0.1:9000 -ssh -ssh-listen :2222 -api-addr :8081 -api-token "your-secret-token"
 
 # 方式 2: 仅运行 SSH 堰垒机(不启用 WAF 代理)
 go build -o bastion ./cmd/bastion
-./bastion -api-listen :8081
+./bastion -api-listen 127.0.0.1:8081 -api-token "your-secret-token"
 ```
+
+> 独立堰垒机的管理 API **默认要求认证**:未提供 `-api-token`(或 `GOWAF_API_TOKEN`)
+> 时进程拒绝启动。本机开发可显式加 `-insecure-no-auth` 承担风险,或用 `-api-listen 0`
+> 完全关闭管理 API。
 
 方式 2 的独立堰垒机二进制也在 `/api/bastion/` 下提供完整的管理接口,
 前端开发控制台代理自动转发 `/api` 到 `http://localhost:8081`。
@@ -315,6 +340,7 @@ rate_limit:
 
 ## 生产环境文档
 
+- [生产就绪度分析](docs/production-readiness.md) - 与生产级的差距清单、API 限流落地场景、修复进度
 - [部署指南](docs/deployment-guide.md) - Docker、Kubernetes、systemd 部署
 - [安全加固指南](docs/security-hardening.md) - 网络安全、访问控制、审计
 - [性能调优指南](docs/performance-tuning.md) - 限流、连接池、内核参数
@@ -324,8 +350,11 @@ rate_limit:
 ## 生产就绪特性
 
 - **配置文件**: 支持 YAML 配置文件( `-config`)，CLI 参数优先于配置文件
-- **API 认证**: 支持 Bearer Token 认证( `-api-token` 或 `GOWAF_API_TOKEN` 环境变量)
-- **API 限流**: 管理 API 限流(默认 100 RPS / 200 burst per IP)
+- **API 认证 fail-closed**: 启用认证但未配置 Token 时**拒绝启动**，不再静默跳过认证
+- **管理面默认只监听本机**: 默认绑定 `127.0.0.1:8081`，避免管理接口暴露到公网
+- **认证前限流 + 失败锁定**: 错误 Token 同样消耗限流额度，5 次失败封禁 IP 15 分钟
+- **API 限流**: 管理 API 限流(默认 100 RPS / 200 burst per IP)，后台任务定期回收限流桶
+- **密钥外置**: 数据库口令支持 `GOWAF_MYSQL_DSN` 环境变量；`config.yaml` 已移出版本控制
 - **Prometheus 指标**: `GET /__waf/metrics?format=prometheus` 输出 Prometheus  exposition 格式
 - **健康检查**: `/api/healthz` 检查上游连通性
 - **配置热更新**: PUT /api/config 实时更新 WAF 配置(模式、限流、封禁、IP 列表等)

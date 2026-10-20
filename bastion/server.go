@@ -308,12 +308,21 @@ func (s *SSHServer) ListUsersWithErr() ([]*User, error) {
 	return s.authStore.ListUsers(), nil
 }
 
-// HasUser checks if a user exists.
+// HasUser checks if a user exists. It reports false on database errors too,
+// so write paths must use HasUserErr instead.
 func (s *SSHServer) HasUser(username string) bool {
+	ok, _ := s.HasUserErr(username)
+	return ok
+}
+
+// HasUserErr 与 HasUser 相同,但把数据库错误透传给调用方。
+// 创建用户/初始化管理员等写路径必须用它:数据库不可用时返回错误,
+// 而不是把「查不到」误当成「不存在」并覆盖已有用户。
+func (s *SSHServer) HasUserErr(username string) (bool, error) {
 	if s.dbAuthStore != nil {
-		return s.dbAuthStore.HasUser(username)
+		return s.dbAuthStore.HasUserErr(username)
 	}
-	return s.authStore.HasUser(username)
+	return s.authStore.HasUser(username), nil
 }
 
 // CanAccessAsset checks if a user can access a specific asset.

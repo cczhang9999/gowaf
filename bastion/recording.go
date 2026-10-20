@@ -69,8 +69,20 @@ func (r *SessionRecorder) StartSession(sessionID, username, assetID, assetName s
 		return nil, fmt.Errorf("create date dir: %w", err)
 	}
 
-	fileName := fmt.Sprintf("%s_%s.cast", username, sessionID)
+	// username 来自管理 API 创建的账号,可能包含 "/" 或 ".."。
+	// 必须先清理再做 filepath.Join,否则可以借助用户名把录像写到录像目录之外。
+	safeUser := sanitizeUsername(username)
+	if safeUser == "" {
+		safeUser = "unknown"
+	}
+	fileName := fmt.Sprintf("%s_%s.cast", safeUser, sessionID)
 	filePath := filepath.Join(dayDir, fileName)
+
+	// 纵深防御:即使 sanitize 将来被改动,也确保最终路径没有逃出当天目录。
+	cleanDay := filepath.Clean(dayDir)
+	if !strings.HasPrefix(filepath.Clean(filePath), cleanDay+string(os.PathSeparator)) {
+		return nil, fmt.Errorf("invalid recording path for user %q", username)
+	}
 
 	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0640)
 	if err != nil {

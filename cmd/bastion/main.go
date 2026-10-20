@@ -61,7 +61,13 @@ func main() {
 		idleTimeout  = flag.Duration("idle-timeout", 30*time.Minute, "空闲会话超时,0 表示不超时")
 
 		// API settings
-		apiListen = flag.String("api-listen", ":8081", "管理 API 监听地址,0 表示禁用")
+		apiListen = flag.String("api-listen", "127.0.0.1:8081", "管理 API 监听地址,0 表示禁用")
+		// apiToken 保护管理 API。留空且 API 启用时进程拒绝启动(fail-closed),
+		// 除非显式声明 -insecure-no-auth。
+		apiToken = flag.String("api-token", "", "管理 API 的 Bearer Token(也可用 GOWAF_API_TOKEN 环境变量)")
+		// insecureNoAuth 是给本地开发用的显式逃生舱:允许无认证暴露管理 API。
+		insecureNoAuth = flag.Bool("insecure-no-auth", false,
+			"危险:允许管理 API 在无认证的情况下运行(仅限本机开发)")
 
 		// Admin credentials (for initial setup)
 		adminUser = flag.String("admin-user", "admin", "初始管理员用户名")
@@ -76,9 +82,27 @@ func main() {
 	)
 	flag.Parse()
 
+	// Token 解析优先级:显式 flag > 环境变量。
+	if *apiToken == "" {
+		*apiToken = os.Getenv("GOWAF_API_TOKEN")
+	}
+	if *mysqlDSN == "" {
+		*mysqlDSN = os.Getenv("GOWAF_MYSQL_DSN")
+	}
+
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
+
+	// Fail-closed:管理 API 默认必须带 Token 才能启动。
+	// 之前这个二进制完全没有认证中间件,任何能访问 :8081 的人都能
+	// 创建/删除用户、提权、改配置、下载会话录像。
+	if *apiListen != "0" && *apiToken == "" && !*insecureNoAuth {
+		fatal(log, "refusing to start: management API has no authentication. "+
+			"Pass -api-token (or set GOWAF_API_TOKEN), or explicitly accept the risk "+
+			"with -insecure-no-auth, or disable the API with -api-listen 0",
+			errors.New("empty api token"))
+	}
 
 	// Build bastion config
 	cfg := &bastion.BastionConfig{
@@ -132,7 +156,12 @@ func main() {
 		Comment:       "Initial admin user",
 		CreatedAt:     time.Now(),
 	}
-	if srv.HasUser(*adminUser) {
+	adminExists, err := srv.HasUserErr(*adminUser)
+	if err != nil {
+		// 数据库不可用时不能把「查不到」当成「不存在」并覆盖已有管理员。
+		fatal(log, "check admin user existence", err)
+	}
+	if adminExists {
 		log.Info("admin user already exists, keeping stored credentials", "username", *adminUser)
 	} else if err := srv.AddUser(admin); err != nil {
 		fatal(log, "create admin user", err)
@@ -180,9 +209,16 @@ func main() {
 		apiMux.Handle("/api/healthz", http.StripPrefix("/api", apiHandler))
 		apiMux.Handle("/api/metrics", http.StripPrefix("/api", apiHandler))
 
+		// 管理 API 必须经过 Bearer Token 认证。/api/healthz 豁免,
+		// 以便负载均衡器/容器探针在不持有 Token 的情况下探活。
+		var handler http.Handler = middleware.Logging(log)(apiMux)
+		if *apiToken != "" {
+			handler = middleware.BearerToken(*apiToken, "/api/healthz")(handler)
+		}
+
 		apiServer := &http.Server{
 			Addr:              *apiListen,
-			Handler:           middleware.Logging(log)(apiMux),
+			Handler:           handler,
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       15 * time.Second,
 			WriteTimeout:      60 * time.Second,

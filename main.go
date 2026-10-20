@@ -45,8 +45,7 @@ var (
 	apiToken = flag.String("api-token", "", "API 服务器身份认证 Token(也可通过 GOWAF_API_TOKEN 环境变量设置)")
 
 	// 配置文件
-	// 未显式传 -config 时,main() 会自动尝试加载当前目录下的 config.yaml。
-	configPath = flag.String("config", "", "YAML 配置文件路径(留空则自动尝试加载当前目录的 config.yaml,CLI 参数优先于配置文件)")
+	configPath = flag.String("config", "", "YAML 配置文件路径(CLI 参数优先于配置文件)")
 
 	// 堡垒机(SSH)模式:当 -ssh 启用时,同时运行 SSH 堡垒机
 	sshEnable      = flag.Bool("ssh", false, "启用 SSH 堰垒机模式(在 WAF 之外同时监听 SSH)")
@@ -246,6 +245,14 @@ func buildWAFConfig(yamlCfg *config.Config) *resolvedConfig {
 		}
 	}
 
+	// 环境变量优先于配置文件,便于把数据库口令从版本库中彻底移出。
+	// 优先级:显式 CLI flag > GOWAF_MYSQL_DSN 环境变量 > YAML 配置。
+	if !setFlags["mysql-dsn"] {
+		if dsn := os.Getenv("GOWAF_MYSQL_DSN"); dsn != "" {
+			cfg.MySQLDSN = dsn
+		}
+	}
+
 	return cfg
 }
 
@@ -305,34 +312,17 @@ func buildServer(listen string, handler http.Handler) *http.Server {
 func main() {
 	flag.Parse()
 
-	// 加载配置文件。
-	// 优先级:
-	//   1. 显式 -config <path> → 加载该文件(解析失败则回落到纯 CLI 参数,并打印告警)
-	//   2. 未指定 -config     → 自动尝试当前目录的 config.yaml;
-	//                          存在则加载(解析失败回落 CLI),不存在则使用纯 CLI 默认值(不报错)。
-	// 这样 `./gowaf` 即可直接读取仓库里的 config.yaml,无需手动传 -config。
+	// 加载配置文件(如果指定)
 	var yamlCfg *config.Config
-	loadPath := *configPath
-	if loadPath == "" {
-		loadPath = "config.yaml"
-	}
-	if _, statErr := os.Stat(loadPath); statErr == nil {
-		cfg, err := config.Load(loadPath)
+	if *configPath != "" {
+		var err error
+		yamlCfg, err = config.Load(*configPath)
 		if err != nil {
-			// 解析失败:不退出,回落到 CLI 参数(保留原行为)
+			// 尝试从 YAML 解析失败后,仍然允许 CLI 参数工作(生产环境需要明确错误)
 			log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-			log.Error("failed to load config file, falling back to CLI flags", "path", loadPath, "err", err)
+			log.Error("failed to load config file, falling back to CLI flags", "path", *configPath, "err", err)
 			yamlCfg = nil
-		} else {
-			yamlCfg = cfg
-			log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-			log.Info("loaded config file", "path", loadPath)
 		}
-	} else if *configPath != "" {
-		// 显式指定的文件不存在:这是配置错误,直接退出
-		log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-		log.Error("config file not found", "path", loadPath)
-		os.Exit(1)
 	}
 
 	log := newLogger(yamlCfg)
@@ -342,6 +332,17 @@ func main() {
 	}
 
 	cfg := buildWAFConfig(yamlCfg)
+
+	// Fail-closed:显式启用了 API 认证却没有 Token 时拒绝启动。
+	// 之前的行为是「enabled=true + token 为空」静默跳过认证中间件,
+	// 管理面(规则、配置、IP 列表、堡垒机用户)等于完全没有认证。
+	if cfg.APIAddr != "0" && yamlCfg != nil && yamlCfg.Security.APIAuth.Enabled && cfg.APIToken == "" {
+		fatal("refusing to start: security.api_auth.enabled is true but no API token is configured "+
+			"(set security.api_auth.token, -api-token or GOWAF_API_TOKEN; "+
+			"or set security.api_auth.enabled=false to explicitly run the management API without auth)",
+			errors.New("empty api token"))
+	}
+
 	target, err := url.Parse(cfg.UpstreamURL)
 	if err != nil || target.Host == "" {
 		fatal("invalid -upstream", fmt.Errorf("%q", cfg.UpstreamURL))
@@ -452,7 +453,13 @@ func main() {
 		CreatedAt:     time.Now(),
 	}
 	// 只在首次创建:否则每次重启都会把管理员密码重置回默认值。
-	if bastionSrv.HasUser(cfg.SSHAdminUser) {
+	adminExists, err := bastionSrv.HasUserErr(cfg.SSHAdminUser)
+	if err != nil {
+		// 数据库不可用时不能把「查不到」当成「不存在」,否则会走 AddUser
+		// 覆盖掉已存在的同名用户(密码/角色/资产被重置)。
+		fatal("check admin user existence", err)
+	}
+	if adminExists {
 		log.Info("admin user already exists, keeping stored credentials", "username", cfg.SSHAdminUser)
 	} else if err := bastionSrv.AddUser(adminUser); err != nil {
 		fatal("create admin user", err)
@@ -475,6 +482,7 @@ func main() {
 	if cfg.APIAddr != "0" {
 		apiServer = NewAPIServerWithBastion(w, cfg.APIAddr, cfg.APIToken, cfg.UpstreamURL, bastionSrv, log)
 		apiServer.SetAPIRateLimit(100, 200) // 管理 API: 100 RPS, 200 burst
+		go apiServer.Run(ctx)               // 定期回收 API 限流桶与认证失败计数,避免内存无界增长
 		go func() {
 			if err := apiServer.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server error", "err", err)

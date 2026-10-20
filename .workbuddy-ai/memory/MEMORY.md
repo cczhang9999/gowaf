@@ -31,9 +31,6 @@ cd web && npm install && npm run dev   # 控制台 http://localhost:3000
 - 启动时只创建不存在的表，已存在的表不动。
 - **不带 `-config config.yaml` / `-mysql-dsn` 启动 = 内存模式**：`/api/bastion/users`
   返回 201 但不落任何表，页面「数据来源」显示 memory。排查这类问题先看这个标签。
-- 注意 `~/Downloads/gowaf/` 是用户的另一份**陈旧克隆**（main.go 无 DB 代码），
-  在里面 `./gowaf` 必然 memory 模式。排查时用 `lsof -p <pid>` 看进程 cwd 和二进制路径，
-  别假定跑的是工作区版本。
 
 ## 前端约定
 - 颜色一律走 CSS 变量（`web/src/assets/styles/index.css`），浅色默认 + `.dark-theme` 覆盖；

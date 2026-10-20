@@ -166,7 +166,17 @@ func (a *AdminAPI) createUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid role; must be admin, user or auditor", http.StatusBadRequest)
 		return
 	}
-	if a.Server.HasUser(req.Username) {
+	// 必须用 HasUserErr:数据库查询失败时不能误判为「用户不存在」,
+	// 否则会走 AddUser 的更新分支覆盖已有用户的密码/角色/资产。
+	exists, err := a.Server.HasUserErr(req.Username)
+	if err != nil {
+		if a.Log != nil {
+			a.Log.Error("check user existence failed", "username", req.Username, "err", err)
+		}
+		writeJSONErr(w, http.StatusBadGateway, "user store unavailable")
+		return
+	}
+	if exists {
 		http.Error(w, "user already exists", http.StatusConflict)
 		return
 	}

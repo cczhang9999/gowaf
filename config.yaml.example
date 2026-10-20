@@ -84,7 +84,8 @@ server:
   listen: ":8080"
   
   # API 服务器地址 (0 表示禁用)
-  api_addr: ":8081"
+  # 默认只监听本机。确需远程访问请改成 ":8081",并务必启用下方 API 认证。
+  api_addr: "127.0.0.1:8081"
   
   # 读请求头超时 (防 slowloris)
   read_header_timeout: "5s"
@@ -194,6 +195,8 @@ security:
       - "Authorization"
   
   # API 认证
+  # enabled=true 时 token 必须非空,否则进程拒绝启动(fail-closed),
+  # 避免出现「以为开了认证、实际没开」的情况。
   api_auth:
     enabled: true
     type: "token"  # none / basic / token

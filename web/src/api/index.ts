@@ -20,6 +20,67 @@ const instance = axios.create({
   timeout: 10000,
 })
 
+// --- API token handling ---------------------------------------------------
+// The management API can require `Authorization: Bearer <token>`. The token is
+// kept in localStorage so it survives reloads. When the backend rejects a
+// request for a missing/invalid token we prompt once and retry, instead of
+// silently failing every page.
+const TOKEN_KEY = 'gowaf_api_token'
+
+export function getApiToken(): string {
+  return localStorage.getItem(TOKEN_KEY) || ''
+}
+
+export function setApiToken(token: string): void {
+  if (token) localStorage.setItem(TOKEN_KEY, token)
+  else localStorage.removeItem(TOKEN_KEY)
+}
+
+let prompting = false
+// Tracks requests already retried once, so a bad token cannot cause a loop.
+const retried = new WeakSet<object>()
+
+instance.interceptors.request.use((config) => {
+  const token = getApiToken()
+  if (token) {
+    config.headers = config.headers ?? {}
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+instance.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const response = error?.response
+    const status = response?.status
+    const body = response?.data
+    const isAuthError =
+      status === 401 ||
+      (status === 403 && typeof body?.error === 'string' && body.error.includes('API token'))
+
+    const original = error?.config
+    if (isAuthError && original && !retried.has(original) && !prompting) {
+      prompting = true
+      try {
+        const entered = window.prompt(
+          'This management API requires an authentication token.\n' +
+            'Paste the token from config.yaml (security.api_auth.token):',
+          getApiToken(),
+        )
+        if (entered !== null && entered.trim() !== '') {
+          setApiToken(entered.trim())
+          retried.add(original)
+          return instance.request(original)
+        }
+      } finally {
+        prompting = false
+      }
+    }
+    return Promise.reject(error)
+  },
+)
+
 // API responses
 interface RulesResponse {
   rules: Rule[]
